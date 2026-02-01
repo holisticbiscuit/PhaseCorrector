@@ -166,6 +166,8 @@ private:
     // Main controls
     juce::ComboBox oversampleBox;
     juce::ComboBox ovsModeBox;
+    juce::ComboBox fftQualityBox;
+    juce::ComboBox fftOverlapBox;
     juce::Slider dryWetSlider;
     juce::Slider outputGainSlider;
     juce::Slider depthSlider;
@@ -184,6 +186,8 @@ private:
     juce::Label titleLabel;
     juce::Label oversampleLabel;
     juce::Label ovsModeLabel;
+    juce::Label fftQualityLabel;
+    juce::Label fftOverlapLabel;
     juce::Label dryWetLabel;
     juce::Label outputGainLabel;
     juce::Label depthLabel;
@@ -196,6 +200,8 @@ private:
     // Parameter attachments
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> oversampleAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> ovsModeAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftQualityAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftOverlapAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> dryWetAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outputGainAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> depthAttachment;
@@ -205,12 +211,12 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> nyquistSlopeAttachment;
 
     // Base dimensions for scaling
-    static constexpr int BASE_WIDTH = 800;
-    static constexpr int BASE_HEIGHT = 600;
-    static constexpr int MIN_WIDTH = 600;
-    static constexpr int MIN_HEIGHT = 450;
-    static constexpr int MAX_WIDTH = 1400;
-    static constexpr int MAX_HEIGHT = 1050;
+    static constexpr int BASE_WIDTH = 850;
+    static constexpr int BASE_HEIGHT = 650;
+    static constexpr int MIN_WIDTH = 640;
+    static constexpr int MIN_HEIGHT = 490;
+    static constexpr int MAX_WIDTH = 1500;
+    static constexpr int MAX_HEIGHT = 1150;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PhaseCorrectorAudioProcessorEditor)
 };

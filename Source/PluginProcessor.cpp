@@ -262,40 +262,135 @@ float NyquistFilter::getMagnitudeAtFrequency(double freq) const
 // Phase Processor Implementation
 //==============================================================================
 PhaseProcessor::PhaseProcessor()
-    : fft(FFT_ORDER + 1) // FFT_SIZE = 8192
 {
-    // Initialize Hann windows
-    for (int i = 0; i < ANALYSIS_SIZE; ++i)
+    // Initialize with default quality (High = 8192 FFT)
+    reconfigure();
+}
+
+juce::StringArray PhaseProcessor::getQualityNames()
+{
+    return { "Low (2048)", "Medium (4096)", "High (8192)", "Very High (16384)", "Extreme (32768)" };
+}
+
+juce::StringArray PhaseProcessor::getOverlapNames()
+{
+    return { "50% (Low Latency)", "75% (High Quality)" };
+}
+
+void PhaseProcessor::setQuality(Quality q)
+{
+    if (q != currentQuality)
     {
-        float windowValue = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * i / (ANALYSIS_SIZE - 1)));
-        analysisWindow[i] = windowValue;
-        synthesisWindow[i] = windowValue;
+        currentQuality = q;
+        needsReconfigure.store(true);
+    }
+}
+
+void PhaseProcessor::setOverlap(Overlap o)
+{
+    if (o != currentOverlap)
+    {
+        currentOverlap = o;
+        needsReconfigure.store(true);
+    }
+}
+
+void PhaseProcessor::buildWindows()
+{
+    analysisWindow.resize(analysisSize);
+    synthesisWindow.resize(analysisSize);
+
+    if (currentOverlap == Overlap::Percent75)
+    {
+        // Hann window for 75% overlap - COLA compliant with sum = 1.5
+        for (int i = 0; i < analysisSize; ++i)
+        {
+            float windowValue = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * i / (analysisSize - 1)));
+            analysisWindow[i] = windowValue;
+            synthesisWindow[i] = windowValue;
+        }
+        windowCompensation = 1.0f / 1.5f;  // Hann^2 sum at 75% overlap = 1.5
+    }
+    else
+    {
+        // Sine window (sqrt-Hann) for 50% overlap - COLA compliant with sum = 1.0
+        // sin^2(x) + cos^2(x) = 1, so perfect reconstruction
+        for (int i = 0; i < analysisSize; ++i)
+        {
+            float windowValue = std::sin(juce::MathConstants<float>::pi * i / (analysisSize - 1));
+            analysisWindow[i] = windowValue;
+            synthesisWindow[i] = windowValue;
+        }
+        windowCompensation = 1.0f;  // Sine^2 sum at 50% overlap = 1.0
+    }
+}
+
+void PhaseProcessor::reconfigure()
+{
+    juce::SpinLock::ScopedLockType lock(processingLock);
+
+    // Calculate sizes based on quality
+    // Analysis order determines the analysis window size
+    int analysisOrder;
+    switch (currentQuality)
+    {
+        case Quality::Low:      analysisOrder = 10; break;  // 1024
+        case Quality::Medium:   analysisOrder = 11; break;  // 2048
+        case Quality::High:     analysisOrder = 12; break;  // 4096
+        case Quality::VeryHigh: analysisOrder = 13; break;  // 8192
+        case Quality::Extreme:  analysisOrder = 14; break;  // 16384
+        default:                analysisOrder = 12; break;
     }
 
-    // Window compensation for 4x overlap with Hann^2 (analysis * synthesis)
-    // Sum of Hann^2 at 75% overlap ≈ 1.5, so divide by 1.5
-    windowCompensation = 1.0f / 1.5f;  // ≈ 0.667
+    analysisSize = 1 << analysisOrder;
+    fftSize = analysisSize * 2;  // 2x zero-padding
+    fftOrder = analysisOrder + 1;
 
-    phaseTable.resize(FFT_SIZE / 2 + 1, 0.0f);
+    // Calculate hop size based on overlap
+    if (currentOverlap == Overlap::Percent75)
+    {
+        hopSize = analysisSize / 4;  // 75% overlap = 4x
+        numOverlaps = 4;
+    }
+    else
+    {
+        hopSize = analysisSize / 2;  // 50% overlap = 2x
+        numOverlaps = 2;
+    }
+
+    // Recreate FFT
+    fft = std::make_unique<juce::dsp::FFT>(fftOrder);
+
+    // Rebuild windows
+    buildWindows();
+
+    // Resize buffers - need extra space for overlap-add
+    int bufferSize = fftSize * 2;  // Extra space for safety
+    for (auto& ch : channels)
+        ch.resize(bufferSize, hopSize);
+
+    // Resize phase table
+    phaseTable.resize(fftSize / 2 + 1, 0.0f);
+
+    needsReconfigure.store(false);
+
+    // Rebuild phase table with new size
+    rebuildPhaseTable();
 }
 
 void PhaseProcessor::prepare(double sampleRate, int /*maxBlockSize*/)
 {
     currentSampleRate = sampleRate;
-    reset();
-    rebuildPhaseTable();
+
+    // Always reconfigure on prepare to ensure correct setup
+    reconfigure();
 }
 
 void PhaseProcessor::reset()
 {
+    juce::SpinLock::ScopedLockType lock(processingLock);
     for (auto& ch : channels)
-    {
-        std::fill(ch.inputBuffer.begin(), ch.inputBuffer.end(), 0.0f);
-        std::fill(ch.outputBuffer.begin(), ch.outputBuffer.end(), 0.0f);
-        ch.inputWritePos = 0;
-        ch.outputReadPos = 0;
-        ch.samplesUntilNextFrame = HOP_SIZE;
-    }
+        ch.clear();
 }
 
 void PhaseProcessor::updatePhaseCurve(const std::vector<std::pair<double, double>>& points)
@@ -356,12 +451,16 @@ void PhaseProcessor::updatePhaseCurve(const std::vector<std::pair<double, double
 
 void PhaseProcessor::rebuildPhaseTable()
 {
-    const int numBins = FFT_SIZE / 2 + 1;
+    const int numBins = fftSize / 2 + 1;
     const float depth = phaseDepth.load();
+
+    // Ensure phase table is correct size
+    if (static_cast<int>(phaseTable.size()) != numBins)
+        phaseTable.resize(numBins, 0.0f);
 
     for (int bin = 0; bin < numBins; ++bin)
     {
-        float freq = static_cast<float>(bin) * static_cast<float>(currentSampleRate) / static_cast<float>(FFT_SIZE);
+        float freq = static_cast<float>(bin) * static_cast<float>(currentSampleRate) / static_cast<float>(fftSize);
 
         if (freq < MIN_FREQ || freq > MAX_FREQ || !phaseCurve.isValid())
         {
@@ -381,12 +480,12 @@ void PhaseProcessor::rebuildPhaseTable()
     }
 
     // Smooth transition at boundaries
-    const int fadeLength = 10;
+    const int fadeLength = std::max(10, fftSize / 512);  // Scale fade with FFT size
     for (int i = 0; i < fadeLength; ++i)
     {
         float fade = static_cast<float>(i) / fadeLength;
-        int lowBin = static_cast<int>((MIN_FREQ / currentSampleRate) * FFT_SIZE) + i;
-        int highBin = static_cast<int>((MAX_FREQ / currentSampleRate) * FFT_SIZE) - i;
+        int lowBin = static_cast<int>((MIN_FREQ / currentSampleRate) * fftSize) + i;
+        int highBin = static_cast<int>((MAX_FREQ / currentSampleRate) * fftSize) - i;
 
         if (lowBin >= 0 && lowBin < numBins)
             phaseTable[lowBin] *= fade;
@@ -399,24 +498,27 @@ void PhaseProcessor::processFrame(int channel)
 {
     auto& ch = channels[channel];
 
-    int readPos = ch.inputWritePos - ANALYSIS_SIZE;
+    int bufferSize = static_cast<int>(ch.inputBuffer.size());
+    int readPos = ch.inputWritePos - analysisSize;
     if (readPos < 0)
-        readPos += static_cast<int>(ch.inputBuffer.size());
+        readPos += bufferSize;
 
-    // Prepare FFT buffer
-    alignas(16) std::array<float, FFT_SIZE * 2> fftData{};
+    // Prepare FFT buffer - use heap allocation for large FFT sizes
+    std::vector<float> fftData(fftSize * 2, 0.0f);
 
-    for (int i = 0; i < ANALYSIS_SIZE; ++i)
+    // Apply analysis window
+    for (int i = 0; i < analysisSize; ++i)
     {
-        int idx = (readPos + i) % static_cast<int>(ch.inputBuffer.size());
+        int idx = (readPos + i) % bufferSize;
         fftData[i] = ch.inputBuffer[idx] * analysisWindow[i];
     }
+    // Zero-padding is already done by vector initialization
 
     // Forward FFT
-    fft.performRealOnlyForwardTransform(fftData.data());
+    fft->performRealOnlyForwardTransform(fftData.data());
 
     // Apply phase modification
-    const int numBins = FFT_SIZE / 2;
+    const int numBins = fftSize / 2;
     for (int bin = 1; bin < numBins; ++bin)
     {
         float real = fftData[bin * 2];
@@ -432,14 +534,14 @@ void PhaseProcessor::processFrame(int channel)
     }
 
     // Inverse FFT
-    fft.performRealOnlyInverseTransform(fftData.data());
+    fft->performRealOnlyInverseTransform(fftData.data());
 
-    // Overlap-add
+    // Overlap-add with synthesis window
     int writePos = ch.outputReadPos;
 
-    for (int i = 0; i < ANALYSIS_SIZE; ++i)
+    for (int i = 0; i < analysisSize; ++i)
     {
-        int idx = (writePos + i) % static_cast<int>(ch.outputBuffer.size());
+        int idx = (writePos + i) % bufferSize;
         float windowedSample = fftData[i] * synthesisWindow[i] * windowCompensation;
         ch.outputBuffer[idx] += windowedSample;
     }
@@ -447,6 +549,16 @@ void PhaseProcessor::processFrame(int channel)
 
 void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
 {
+    // Check if reconfiguration is needed (quality/overlap changed)
+    if (needsReconfigure.load())
+    {
+        reconfigure();
+    }
+
+    juce::SpinLock::ScopedTryLockType lock(processingLock);
+    if (!lock.isLocked())
+        return;  // Skip processing if reconfiguring
+
     const int numChannels = std::min(buffer.getNumChannels(), 2);
     const int numSamples = buffer.getNumSamples();
 
@@ -455,6 +567,7 @@ void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
         for (int ch = 0; ch < numChannels; ++ch)
         {
             auto& state = channels[ch];
+            const int bufferSize = static_cast<int>(state.inputBuffer.size());
 
             state.inputBuffer[state.inputWritePos] = buffer.getSample(ch, sample);
 
@@ -463,14 +576,14 @@ void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
 
             buffer.setSample(ch, sample, outputSample);
 
-            state.inputWritePos = (state.inputWritePos + 1) % static_cast<int>(state.inputBuffer.size());
-            state.outputReadPos = (state.outputReadPos + 1) % static_cast<int>(state.outputBuffer.size());
+            state.inputWritePos = (state.inputWritePos + 1) % bufferSize;
+            state.outputReadPos = (state.outputReadPos + 1) % bufferSize;
 
             state.samplesUntilNextFrame--;
             if (state.samplesUntilNextFrame <= 0)
             {
                 processFrame(ch);
-                state.samplesUntilNextFrame = HOP_SIZE;
+                state.samplesUntilNextFrame = hopSize;
             }
         }
     }
@@ -747,6 +860,8 @@ PhaseCorrectorAudioProcessor::PhaseCorrectorAudioProcessor()
     apvts.addParameterListener("dryWet", this);
     apvts.addParameterListener("outputGain", this);
     apvts.addParameterListener("depth", this);
+    apvts.addParameterListener("fftQuality", this);
+    apvts.addParameterListener("fftOverlap", this);
     apvts.addParameterListener("nyquistFreq", this);
     apvts.addParameterListener("nyquistQ", this);
     apvts.addParameterListener("nyquistSlope", this);
@@ -760,6 +875,8 @@ PhaseCorrectorAudioProcessor::~PhaseCorrectorAudioProcessor()
     apvts.removeParameterListener("dryWet", this);
     apvts.removeParameterListener("outputGain", this);
     apvts.removeParameterListener("depth", this);
+    apvts.removeParameterListener("fftQuality", this);
+    apvts.removeParameterListener("fftOverlap", this);
     apvts.removeParameterListener("nyquistFreq", this);
     apvts.removeParameterListener("nyquistQ", this);
     apvts.removeParameterListener("nyquistSlope", this);
@@ -797,6 +914,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout PhaseCorrectorAudioProcessor
         juce::ParameterID("depth", 1), "Depth",
         juce::NormalisableRange<float>(-200.0f, 200.0f, 0.1f), 100.0f,
         juce::AudioParameterFloatAttributes().withLabel("%")));
+
+    // FFT Quality - determines frequency resolution and latency
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("fftQuality", 1), "FFT Quality",
+        PhaseProcessor::getQualityNames(), 2));  // Default: High (8192)
+
+    // Overlap amount - affects latency vs quality trade-off
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("fftOverlap", 1), "Overlap",
+        PhaseProcessor::getOverlapNames(), 1));  // Default: 75% (High Quality)
 
     // Nyquist Filter Enable
     params.push_back(std::make_unique<juce::AudioParameterBool>(
@@ -846,6 +973,20 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
     {
         phaseProcessor.setDepth(newValue / 100.0f);
     }
+    else if (parameterID == "fftQuality")
+    {
+        phaseProcessor.setQuality(static_cast<PhaseProcessor::Quality>(static_cast<int>(newValue)));
+        // Update latency reporting to host
+        setLatencySamples(phaseProcessor.getLatencySamples() +
+                          static_cast<int>(oversamplingManager.getLatencySamples()));
+    }
+    else if (parameterID == "fftOverlap")
+    {
+        phaseProcessor.setOverlap(static_cast<PhaseProcessor::Overlap>(static_cast<int>(newValue)));
+        // Update latency reporting to host
+        setLatencySamples(phaseProcessor.getLatencySamples() +
+                          static_cast<int>(oversamplingManager.getLatencySamples()));
+    }
     else if (parameterID == "nyquistFreq" || parameterID == "nyquistQ" || parameterID == "nyquistSlope")
     {
         float freq = apvts.getRawParameterValue("nyquistFreq")->load();
@@ -871,6 +1012,12 @@ void PhaseCorrectorAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     lastSampleRate = sampleRate;
     lastBlockSize = samplesPerBlock;
 
+    // Apply quality and overlap settings before preparing
+    int quality = static_cast<int>(apvts.getRawParameterValue("fftQuality")->load());
+    int overlap = static_cast<int>(apvts.getRawParameterValue("fftOverlap")->load());
+    phaseProcessor.setQuality(static_cast<PhaseProcessor::Quality>(quality));
+    phaseProcessor.setOverlap(static_cast<PhaseProcessor::Overlap>(overlap));
+
     oversamplingManager.prepare(sampleRate, samplesPerBlock);
 
     double effectiveSampleRate = sampleRate * oversamplingManager.getFactor();
@@ -891,6 +1038,10 @@ void PhaseCorrectorAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     spec.numChannels = 2;
     outputGain.prepare(spec);
     outputGain.setGainDecibels(apvts.getRawParameterValue("outputGain")->load());
+
+    // Report total latency to host for PDC
+    setLatencySamples(phaseProcessor.getLatencySamples() +
+                      static_cast<int>(oversamplingManager.getLatencySamples()));
 }
 
 void PhaseCorrectorAudioProcessor::releaseResources()

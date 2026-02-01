@@ -811,6 +811,18 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     ovsModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         audioProcessor.getAPVTS(), "ovsMode", ovsModeBox);
 
+    setupLabel(fftQualityLabel, "FFT Quality");
+    fftQualityBox.addItemList(PhaseProcessor::getQualityNames(), 1);
+    addAndMakeVisible(fftQualityBox);
+    fftQualityAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getAPVTS(), "fftQuality", fftQualityBox);
+
+    setupLabel(fftOverlapLabel, "Overlap");
+    fftOverlapBox.addItemList(PhaseProcessor::getOverlapNames(), 1);
+    addAndMakeVisible(fftOverlapBox);
+    fftOverlapAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getAPVTS(), "fftOverlap", fftOverlapBox);
+
     setupLabel(depthLabel, "Depth");
     setupSlider(depthSlider, "%");
     depthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -935,23 +947,36 @@ void PhaseCorrectorAudioProcessorEditor::resized()
     int labelH = static_cast<int>(15 * scale);
     int spacing = static_cast<int>(15 * scale);
 
-    // Main controls (left side)
-    int x = static_cast<int>(20 * scale);
+    // Main controls (left side) - two rows of combo boxes
+    int x = static_cast<int>(15 * scale);
     int y = controlsY + static_cast<int>(5 * scale);
+    int comboW = static_cast<int>(85 * scale);
+    int comboH = static_cast<int>(22 * scale);
+    int comboSpacing = static_cast<int>(5 * scale);
 
-    // Oversampling
-    oversampleLabel.setBounds(x, y, static_cast<int>(70 * scale), labelH);
-    oversampleBox.setBounds(x, y + labelH + 2, static_cast<int>(70 * scale),
-                            static_cast<int>(25 * scale));
+    // Row 1: Oversampling and OVS Mode
+    oversampleLabel.setBounds(x, y, comboW, labelH);
+    oversampleBox.setBounds(x, y + labelH + 2, comboW, comboH);
 
-    x += static_cast<int>(75 * scale);
+    x += comboW + comboSpacing;
 
-    // OVS Filter Mode (FIR/IIR)
-    ovsModeLabel.setBounds(x, y, static_cast<int>(70 * scale), labelH);
-    ovsModeBox.setBounds(x, y + labelH + 2, static_cast<int>(70 * scale),
-                         static_cast<int>(25 * scale));
+    ovsModeLabel.setBounds(x, y, comboW, labelH);
+    ovsModeBox.setBounds(x, y + labelH + 2, comboW, comboH);
 
-    x += static_cast<int>(75 * scale) + spacing;
+    // Row 2: FFT Quality and Overlap (below row 1)
+    x = static_cast<int>(15 * scale);
+    int row2Y = y + labelH + comboH + static_cast<int>(8 * scale);
+
+    fftQualityLabel.setBounds(x, row2Y, comboW, labelH);
+    fftQualityBox.setBounds(x, row2Y + labelH + 2, comboW, comboH);
+
+    x += comboW + comboSpacing;
+
+    fftOverlapLabel.setBounds(x, row2Y, comboW, labelH);
+    fftOverlapBox.setBounds(x, row2Y + labelH + 2, comboW, comboH);
+
+    // Knobs start after the combo boxes
+    x = static_cast<int>(195 * scale);
 
     // Depth
     depthLabel.setBounds(x, y, knobSize, labelH);

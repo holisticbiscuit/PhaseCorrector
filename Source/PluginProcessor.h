@@ -83,11 +83,22 @@ private:
 class PhaseProcessor
 {
 public:
-    static constexpr int FFT_ORDER = 12;
-    static constexpr int ANALYSIS_SIZE = 1 << FFT_ORDER;    // 4096
-    static constexpr int FFT_SIZE = ANALYSIS_SIZE * 2;      // 8192 (2x zero-padding)
-    static constexpr int HOP_SIZE = ANALYSIS_SIZE / 4;      // 1024 (4x overlap)
-    static constexpr int NUM_OVERLAPS = 4;
+    // Quality levels - determines FFT size and frequency resolution
+    enum class Quality
+    {
+        Low = 0,      // 2048 FFT, ~43 Hz resolution @ 44.1k
+        Medium = 1,   // 4096 FFT, ~21 Hz resolution
+        High = 2,     // 8192 FFT, ~10.7 Hz resolution (default)
+        VeryHigh = 3, // 16384 FFT, ~5.4 Hz resolution
+        Extreme = 4   // 32768 FFT, ~2.7 Hz resolution
+    };
+
+    // Overlap amount - affects latency and quality
+    enum class Overlap
+    {
+        Percent50 = 0,  // 2x overlap, lower latency, uses Sine window
+        Percent75 = 1   // 4x overlap, better quality, uses Hann window (default)
+    };
 
     PhaseProcessor();
     ~PhaseProcessor() = default;
@@ -100,30 +111,76 @@ public:
     void setDepth(float depth) { phaseDepth.store(juce::jlimit(-2.0f, 2.0f, depth)); }
     float getDepth() const { return phaseDepth.load(); }
 
+    // Quality and overlap settings
+    void setQuality(Quality q);
+    void setOverlap(Overlap o);
+    Quality getQuality() const { return currentQuality; }
+    Overlap getOverlap() const { return currentOverlap; }
+
+    // Get current latency in samples
+    int getLatencySamples() const { return analysisSize; }
+
     const std::vector<float>& getPhaseTable() const { return phaseTable; }
     double getSampleRate() const { return currentSampleRate; }
+    int getFFTSize() const { return fftSize; }
+    int getAnalysisSize() const { return analysisSize; }
+
+    static juce::StringArray getQualityNames();
+    static juce::StringArray getOverlapNames();
 
 private:
     void rebuildPhaseTable();
     void processFrame(int channel);
+    void reconfigure();  // Rebuilds FFT, windows, buffers
+    void buildWindows();
 
-    juce::dsp::FFT fft;
+    std::unique_ptr<juce::dsp::FFT> fft;
 
     struct ChannelState
     {
-        std::array<float, FFT_SIZE> inputBuffer{};
-        std::array<float, FFT_SIZE> outputBuffer{};
+        std::vector<float> inputBuffer;
+        std::vector<float> outputBuffer;
         int inputWritePos = 0;
         int outputReadPos = 0;
-        int samplesUntilNextFrame = HOP_SIZE;
+        int samplesUntilNextFrame = 0;
+
+        void resize(int bufferSize, int hopSize)
+        {
+            inputBuffer.resize(bufferSize, 0.0f);
+            outputBuffer.resize(bufferSize, 0.0f);
+            inputWritePos = 0;
+            outputReadPos = 0;
+            samplesUntilNextFrame = hopSize;
+        }
+
+        void clear()
+        {
+            std::fill(inputBuffer.begin(), inputBuffer.end(), 0.0f);
+            std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0f);
+            inputWritePos = 0;
+            outputReadPos = 0;
+        }
     };
 
     std::array<ChannelState, 2> channels;
 
-    // Windows (Hann for COLA compliance)
-    std::array<float, ANALYSIS_SIZE> analysisWindow{};
-    std::array<float, ANALYSIS_SIZE> synthesisWindow{};
+    // Dynamic windows
+    std::vector<float> analysisWindow;
+    std::vector<float> synthesisWindow;
     float windowCompensation = 1.0f;
+
+    // Current FFT parameters
+    int fftOrder = 13;        // 2^13 = 8192
+    int fftSize = 8192;
+    int analysisSize = 4096;
+    int hopSize = 1024;
+    int numOverlaps = 4;
+
+    // Quality settings
+    Quality currentQuality = Quality::High;
+    Overlap currentOverlap = Overlap::Percent75;
+    std::atomic<bool> needsReconfigure{false};
+    juce::SpinLock processingLock;
 
     // Phase modification table
     std::vector<float> phaseTable;
