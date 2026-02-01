@@ -458,6 +458,9 @@ void PhaseProcessor::rebuildPhaseTable()
     if (static_cast<int>(phaseTable.size()) != numBins)
         phaseTable.resize(numBins, 0.0f);
 
+    // Also rebuild the impulse response for proper all-pass filtering
+    rebuildImpulseResponse();
+
     for (int bin = 0; bin < numBins; ++bin)
     {
         float freq = static_cast<float>(bin) * static_cast<float>(currentSampleRate) / static_cast<float>(fftSize);
@@ -480,7 +483,7 @@ void PhaseProcessor::rebuildPhaseTable()
     }
 
     // Smooth transition at boundaries
-    const int fadeLength = std::max(10, fftSize / 512);  // Scale fade with FFT size
+    const int fadeLength = std::max(10, fftSize / 512);
     for (int i = 0; i < fadeLength; ++i)
     {
         float fade = static_cast<float>(i) / fadeLength;
@@ -492,6 +495,45 @@ void PhaseProcessor::rebuildPhaseTable()
         if (highBin >= 0 && highBin < numBins)
             phaseTable[highBin] *= fade;
     }
+}
+
+void PhaseProcessor::rebuildImpulseResponse()
+{
+    // Build the all-pass filter frequency response from the phase curve
+    // H(k) = e^(j * phase(k)) where |H(k)| = 1 (all-pass)
+    // Store as complex spectrum for fast convolution
+
+    const int numBins = fftSize / 2 + 1;
+    const float depth = phaseDepth.load();
+
+    // Resize filter spectrum buffer (interleaved real/imag for complex multiply)
+    if (static_cast<int>(filterSpectrum.size()) != fftSize * 2)
+        filterSpectrum.resize(fftSize * 2, 0.0f);
+
+    // Build complex frequency response: H(k) = e^(j * phase(k))
+    for (int bin = 0; bin < numBins; ++bin)
+    {
+        float phase = 0.0f;
+
+        if (phaseCurve.isValid())
+        {
+            float freq = static_cast<float>(bin) * static_cast<float>(currentSampleRate) / static_cast<float>(fftSize);
+
+            if (freq >= MIN_FREQ && freq <= MAX_FREQ)
+            {
+                float logFreq = std::log10(std::max(freq, MIN_FREQ));
+                double normalizedPhase = phaseCurve.evaluate(logFreq);
+                normalizedPhase = juce::jlimit(-1.0, 1.0, normalizedPhase);
+                phase = static_cast<float>(normalizedPhase) * 2.0f * juce::MathConstants<float>::pi * depth;
+            }
+        }
+
+        // H(k) = cos(phase) + j*sin(phase) (magnitude = 1, all-pass)
+        filterSpectrum[bin * 2] = std::cos(phase);      // Real
+        filterSpectrum[bin * 2 + 1] = std::sin(phase);  // Imaginary
+    }
+
+    filterIRReady.store(true);
 }
 
 void PhaseProcessor::processFrame(int channel)
@@ -508,19 +550,17 @@ void PhaseProcessor::processFrame(int channel)
     const float* __restrict inBuf = ch.inputBuffer.data();
     const float* __restrict anaWin = analysisWindow.data();
 
-    // Clear FFT buffer (only the part we use)
+    // Clear FFT buffer
     std::memset(fftData, 0, fftSize * 2 * sizeof(float));
 
-    // Apply analysis window - unrolled for better pipelining
+    // Apply analysis window
     if (readPos + analysisSize <= bufferSize)
     {
-        // Contiguous read - faster path
         for (int i = 0; i < analysisSize; ++i)
             fftData[i] = inBuf[readPos + i] * anaWin[i];
     }
     else
     {
-        // Wrapped read
         for (int i = 0; i < analysisSize; ++i)
         {
             int idx = (readPos + i) % bufferSize;
@@ -531,53 +571,32 @@ void PhaseProcessor::processFrame(int channel)
     // Forward FFT
     fft->performRealOnlyForwardTransform(fftData);
 
-    // Check if we need to apply phase modification at all
+    // Apply all-pass filter via complex multiplication in frequency domain
+    // This is proper convolution: Y(k) = X(k) * H(k)
+    // Complex multiply: (a+jb)(c+jd) = (ac-bd) + j(ad+bc)
     const float depth = std::abs(phaseDepth.load());
-    const bool hasPhaseData = phaseCurve.isValid() && depth > 0.001f;
+    const bool hasPhaseData = phaseCurve.isValid() && depth > 0.001f && filterIRReady.load();
 
     if (hasPhaseData)
     {
-        // Apply phase modification using fast math
-        const int numBins = fftSize / 2;
-        const float* __restrict phasePtr = phaseTable.data();
+        const float* __restrict filterSpec = filterSpectrum.data();
+        const int numBins = fftSize / 2 + 1;
 
-        // Process 4 bins at a time for better cache utilization
-        int bin = 1;
-        for (; bin + 3 < numBins; bin += 4)
-        {
-            for (int j = 0; j < 4; ++j)
-            {
-                const int b = bin + j;
-                const int idx = b * 2;
-                const float real = fftData[idx];
-                const float imag = fftData[idx + 1];
-
-                const float magSq = real * real + imag * imag;
-                if (magSq > 1e-10f)  // Skip near-silent bins
-                {
-                    const float magnitude = FastMath::fastSqrt(magSq);
-                    const float phase = FastMath::fastAtan2(imag, real) + phasePtr[b];
-                    fftData[idx] = magnitude * FastMath::fastCos(phase);
-                    fftData[idx + 1] = magnitude * FastMath::fastSin(phase);
-                }
-            }
-        }
-
-        // Handle remaining bins
-        for (; bin < numBins; ++bin)
+        for (int bin = 0; bin < numBins; ++bin)
         {
             const int idx = bin * 2;
-            const float real = fftData[idx];
-            const float imag = fftData[idx + 1];
 
-            const float magSq = real * real + imag * imag;
-            if (magSq > 1e-10f)
-            {
-                const float magnitude = FastMath::fastSqrt(magSq);
-                const float phase = FastMath::fastAtan2(imag, real) + phasePtr[bin];
-                fftData[idx] = magnitude * FastMath::fastCos(phase);
-                fftData[idx + 1] = magnitude * FastMath::fastSin(phase);
-            }
+            // Input spectrum (X)
+            const float xReal = fftData[idx];
+            const float xImag = fftData[idx + 1];
+
+            // Filter spectrum (H) - all-pass: H(k) = e^(j*phase(k))
+            const float hReal = filterSpec[idx];
+            const float hImag = filterSpec[idx + 1];
+
+            // Complex multiplication: Y = X * H
+            fftData[idx] = xReal * hReal - xImag * hImag;      // Real part
+            fftData[idx + 1] = xReal * hImag + xImag * hReal;  // Imaginary part
         }
     }
 
@@ -592,13 +611,11 @@ void PhaseProcessor::processFrame(int channel)
 
     if (writePos + analysisSize <= bufferSize)
     {
-        // Contiguous write - faster path
         for (int i = 0; i < analysisSize; ++i)
             outBuf[writePos + i] += fftData[i] * synWin[i] * compensation;
     }
     else
     {
-        // Wrapped write
         for (int i = 0; i < analysisSize; ++i)
         {
             int idx = (writePos + i) % bufferSize;

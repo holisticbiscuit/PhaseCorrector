@@ -207,6 +207,7 @@ public:
 
 private:
     void rebuildPhaseTable();
+    void rebuildImpulseResponse();  // Build all-pass filter IR from phase curve
     void processFrame(int channel);
     void processFrameBypass(int channel);  // Fast path when no phase processing needed
     void reconfigure();  // Rebuilds FFT, windows, buffers
@@ -264,6 +265,9 @@ private:
 
     // Phase modification table
     std::vector<float> phaseTable;
+    std::vector<float> filterIR;        // All-pass filter impulse response
+    std::vector<float> filterSpectrum;  // FFT of filter IR (for fast convolution)
+    std::atomic<bool> filterIRReady{false};
     CubicSpline phaseCurve;
     std::mutex curveMutex;
 
