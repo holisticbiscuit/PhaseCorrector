@@ -1,0 +1,28 @@
+# Build directories
+build/
+Builds/
+cmake-build-*/
+
+# IDE files
+.vs/
+.vscode/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.vcxproj.user
+
+# JUCE generated
+JuceLibraryCode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Claude Code
+.claude/
