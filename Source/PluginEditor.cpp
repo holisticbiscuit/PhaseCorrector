@@ -284,6 +284,16 @@ void PhaseCurveDisplay::clearCurve()
     repaint();
 }
 
+void PhaseCurveDisplay::invertCurve()
+{
+    // Flip all phase values
+    for (auto& point : editablePoints)
+        point.second = -point.second;
+
+    updateProcessorCurve();
+    repaint();
+}
+
 void PhaseCurveDisplay::mouseDown(const juce::MouseEvent& event)
 {
     if (event.mods.isLeftButtonDown())
@@ -783,6 +793,11 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     clearButton.onClick = [this]() { curveDisplay.clearCurve(); };
     addAndMakeVisible(clearButton);
 
+    // Invert button (flips phase curve for correction mode)
+    invertButton.setButtonText("Invert");
+    invertButton.onClick = [this]() { curveDisplay.invertCurve(); };
+    addAndMakeVisible(invertButton);
+
     // Main controls
     setupLabel(oversampleLabel, "Oversampling");
     oversampleBox.addItemList(OversamplingManager::getRateNames(), 1);
@@ -887,9 +902,11 @@ void PhaseCorrectorAudioProcessorEditor::resized()
     titleLabel.setBounds(static_cast<int>(15 * scale), 0,
                          static_cast<int>(200 * scale), headerH);
 
-    // Clear button in header
+    // Clear and Invert buttons in header
     clearButton.setBounds(static_cast<int>(220 * scale), static_cast<int>(10 * scale),
-                          static_cast<int>(60 * scale), static_cast<int>(25 * scale));
+                          static_cast<int>(55 * scale), static_cast<int>(25 * scale));
+    invertButton.setBounds(static_cast<int>(280 * scale), static_cast<int>(10 * scale),
+                           static_cast<int>(55 * scale), static_cast<int>(25 * scale));
 
     statusLabel.setBounds(getWidth() - static_cast<int>(350 * scale), 0,
                           static_cast<int>(340 * scale), headerH);

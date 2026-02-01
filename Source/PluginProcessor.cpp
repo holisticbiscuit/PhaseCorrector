@@ -590,16 +590,19 @@ void OversamplingManager::createOversampler()
         return;
     }
 
-    // Use FIR for lower rates (best quality), IIR for very high rates (stability)
-    // FIR can be unstable or very CPU-heavy at order > 4 (16x+)
-    juce::dsp::Oversampling<float>::FilterType filterType;
-
-    if (order <= 4)  // Up to 16x: use high-quality FIR
-        filterType = juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple;
-    else  // 32x, 64x: use IIR (stable, lower CPU)
-        filterType = juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR;
-
-    oversampler = std::make_unique<juce::dsp::Oversampling<float>>(2, order, filterType, true);
+    // Always use linear phase FIR filters for best quality
+    // filterHalfBandFIREquiripple provides linear phase response
+    try
+    {
+        oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
+            2, order, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true);
+    }
+    catch (...)
+    {
+        // Fallback to IIR if FIR fails (shouldn't happen but safety first)
+        oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
+            2, order, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true);
+    }
 }
 
 void OversamplingManager::prepare(double sampleRate, int blockSize)
@@ -711,10 +714,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout PhaseCorrectorAudioProcessor
         juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f,
         juce::AudioParameterFloatAttributes().withLabel("dB")));
 
-    // Phase Depth (like MFreeformPhase)
+    // Phase Depth - negative values invert the phase curve (for correction)
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("depth", 1), "Depth",
-        juce::NormalisableRange<float>(0.0f, 200.0f, 0.1f), 100.0f,
+        juce::NormalisableRange<float>(-200.0f, 200.0f, 0.1f), 100.0f,
         juce::AudioParameterFloatAttributes().withLabel("%")));
 
     // Nyquist Filter Enable

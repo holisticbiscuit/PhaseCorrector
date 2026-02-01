@@ -97,7 +97,7 @@ public:
     void reset();
 
     void updatePhaseCurve(const std::vector<std::pair<double, double>>& points);
-    void setDepth(float depth) { phaseDepth.store(juce::jlimit(0.0f, 2.0f, depth)); }
+    void setDepth(float depth) { phaseDepth.store(juce::jlimit(-2.0f, 2.0f, depth)); }
     float getDepth() const { return phaseDepth.load(); }
 
     const std::vector<float>& getPhaseTable() const { return phaseTable; }

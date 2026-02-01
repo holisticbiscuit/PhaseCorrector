@@ -70,6 +70,9 @@ public:
     // Clear the curve
     void clearCurve();
 
+    // Invert the curve (flip phase signs)
+    void invertCurve();
+
 private:
     void drawGrid(juce::Graphics& g);
     void drawCurve(juce::Graphics& g);
@@ -174,6 +177,7 @@ private:
 
     // Buttons
     juce::TextButton clearButton;
+    juce::TextButton invertButton;
 
     // Labels
     juce::Label titleLabel;
