@@ -498,53 +498,112 @@ void PhaseProcessor::processFrame(int channel)
 {
     auto& ch = channels[channel];
 
-    int bufferSize = static_cast<int>(ch.inputBuffer.size());
+    const int bufferSize = static_cast<int>(ch.inputBuffer.size());
     int readPos = ch.inputWritePos - analysisSize;
     if (readPos < 0)
         readPos += bufferSize;
 
     // Use pre-allocated FFT buffer
-    float* fftData = ch.fftBuffer.data();
+    float* __restrict fftData = ch.fftBuffer.data();
+    const float* __restrict inBuf = ch.inputBuffer.data();
+    const float* __restrict anaWin = analysisWindow.data();
 
-    // Clear and apply analysis window
+    // Clear FFT buffer (only the part we use)
     std::memset(fftData, 0, fftSize * 2 * sizeof(float));
-    for (int i = 0; i < analysisSize; ++i)
+
+    // Apply analysis window - unrolled for better pipelining
+    if (readPos + analysisSize <= bufferSize)
     {
-        int idx = (readPos + i) % bufferSize;
-        fftData[i] = ch.inputBuffer[idx] * analysisWindow[i];
+        // Contiguous read - faster path
+        for (int i = 0; i < analysisSize; ++i)
+            fftData[i] = inBuf[readPos + i] * anaWin[i];
+    }
+    else
+    {
+        // Wrapped read
+        for (int i = 0; i < analysisSize; ++i)
+        {
+            int idx = (readPos + i) % bufferSize;
+            fftData[i] = inBuf[idx] * anaWin[i];
+        }
     }
 
     // Forward FFT
     fft->performRealOnlyForwardTransform(fftData);
 
-    // Apply phase modification - optimized loop
-    const int numBins = fftSize / 2;
-    const float* phasePtr = phaseTable.data();
+    // Check if we need to apply phase modification at all
+    const float depth = std::abs(phaseDepth.load());
+    const bool hasPhaseData = phaseCurve.isValid() && depth > 0.001f;
 
-    for (int bin = 1; bin < numBins; ++bin)
+    if (hasPhaseData)
     {
-        const int idx = bin * 2;
-        const float real = fftData[idx];
-        const float imag = fftData[idx + 1];
+        // Apply phase modification using fast math
+        const int numBins = fftSize / 2;
+        const float* __restrict phasePtr = phaseTable.data();
 
-        const float magnitude = std::sqrt(real * real + imag * imag);
-        const float phase = std::atan2(imag, real) + phasePtr[bin];
+        // Process 4 bins at a time for better cache utilization
+        int bin = 1;
+        for (; bin + 3 < numBins; bin += 4)
+        {
+            for (int j = 0; j < 4; ++j)
+            {
+                const int b = bin + j;
+                const int idx = b * 2;
+                const float real = fftData[idx];
+                const float imag = fftData[idx + 1];
 
-        fftData[idx] = magnitude * std::cos(phase);
-        fftData[idx + 1] = magnitude * std::sin(phase);
+                const float magSq = real * real + imag * imag;
+                if (magSq > 1e-10f)  // Skip near-silent bins
+                {
+                    const float magnitude = FastMath::fastSqrt(magSq);
+                    const float phase = FastMath::fastAtan2(imag, real) + phasePtr[b];
+                    fftData[idx] = magnitude * FastMath::fastCos(phase);
+                    fftData[idx + 1] = magnitude * FastMath::fastSin(phase);
+                }
+            }
+        }
+
+        // Handle remaining bins
+        for (; bin < numBins; ++bin)
+        {
+            const int idx = bin * 2;
+            const float real = fftData[idx];
+            const float imag = fftData[idx + 1];
+
+            const float magSq = real * real + imag * imag;
+            if (magSq > 1e-10f)
+            {
+                const float magnitude = FastMath::fastSqrt(magSq);
+                const float phase = FastMath::fastAtan2(imag, real) + phasePtr[bin];
+                fftData[idx] = magnitude * FastMath::fastCos(phase);
+                fftData[idx + 1] = magnitude * FastMath::fastSin(phase);
+            }
+        }
     }
 
     // Inverse FFT
     fft->performRealOnlyInverseTransform(fftData);
 
     // Overlap-add with synthesis window
-    int writePos = ch.outputReadPos;
+    const int writePos = ch.outputReadPos;
+    float* __restrict outBuf = ch.outputBuffer.data();
+    const float* __restrict synWin = synthesisWindow.data();
     const float compensation = windowCompensation;
 
-    for (int i = 0; i < analysisSize; ++i)
+    if (writePos + analysisSize <= bufferSize)
     {
-        int idx = (writePos + i) % bufferSize;
-        ch.outputBuffer[idx] += fftData[i] * synthesisWindow[i] * compensation;
+        // Contiguous write - faster path
+        for (int i = 0; i < analysisSize; ++i)
+            outBuf[writePos + i] += fftData[i] * synWin[i] * compensation;
+    }
+    else
+    {
+        // Wrapped write
+        for (int i = 0; i < analysisSize; ++i)
+        {
+            int idx = (writePos + i) % bufferSize;
+            outBuf[idx] += fftData[i] * synWin[i] * compensation;
+        }
     }
 }
 
@@ -562,6 +621,11 @@ void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
 
     const int numChannels = std::min(buffer.getNumChannels(), 2);
     const int numSamples = buffer.getNumSamples();
+
+    // Fast bypass: if no phase curve and depth is effectively zero, just pass through
+    // with latency compensation (still need to maintain buffer state)
+    const float depth = std::abs(phaseDepth.load());
+    const bool shouldProcess = phaseCurve.isValid() && depth > 0.001f;
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
@@ -583,10 +647,45 @@ void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
             state.samplesUntilNextFrame--;
             if (state.samplesUntilNextFrame <= 0)
             {
-                processFrame(ch);
+                if (shouldProcess)
+                {
+                    processFrame(ch);
+                }
+                else
+                {
+                    // Bypass mode: just copy input to output with proper windowing
+                    // to maintain correct latency behavior
+                    processFrameBypass(ch);
+                }
                 state.samplesUntilNextFrame = hopSize;
             }
         }
+    }
+}
+
+void PhaseProcessor::processFrameBypass(int channel)
+{
+    // Simplified frame processing for bypass mode - no FFT, just overlap-add
+    auto& ch = channels[channel];
+
+    const int bufferSize = static_cast<int>(ch.inputBuffer.size());
+    int readPos = ch.inputWritePos - analysisSize;
+    if (readPos < 0)
+        readPos += bufferSize;
+
+    const int writePos = ch.outputReadPos;
+    const float* __restrict inBuf = ch.inputBuffer.data();
+    float* __restrict outBuf = ch.outputBuffer.data();
+    const float* __restrict anaWin = analysisWindow.data();
+    const float* __restrict synWin = synthesisWindow.data();
+    const float compensation = windowCompensation;
+
+    // Direct overlap-add without FFT
+    for (int i = 0; i < analysisSize; ++i)
+    {
+        int rIdx = (readPos + i) % bufferSize;
+        int wIdx = (writePos + i) % bufferSize;
+        outBuf[wIdx] += inBuf[rIdx] * anaWin[i] * synWin[i] * compensation;
     }
 }
 
@@ -850,13 +949,118 @@ juce::StringArray OversamplingManager::getFilterModeNames()
 }
 
 //==============================================================================
+// Preset Manager Implementation
+//==============================================================================
+PresetManager::PresetManager(juce::AudioProcessorValueTreeState& apvtsRef,
+                             std::function<std::vector<std::pair<double, double>>()> getCurveFunc,
+                             std::function<void(const std::vector<std::pair<double, double>>&)> setCurveFunc)
+    : apvts(apvtsRef), getCurve(getCurveFunc), setCurve(setCurveFunc)
+{
+}
+
+juce::File PresetManager::getPresetDirectory() const
+{
+    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                   .getChildFile("PhaseCorrector")
+                   .getChildFile("Presets");
+    if (!dir.exists())
+        dir.createDirectory();
+    return dir;
+}
+
+juce::File PresetManager::getPresetFile(const juce::String& name) const
+{
+    return getPresetDirectory().getChildFile(name + ".xml");
+}
+
+void PresetManager::savePreset(const juce::String& name)
+{
+    if (name.isEmpty())
+        return;
+
+    auto state = apvts.copyState();
+
+    // Save curve data
+    auto curvePoints = getCurve();
+    if (!curvePoints.empty())
+    {
+        juce::String curveData;
+        for (const auto& point : curvePoints)
+            curveData += juce::String(point.first, 6) + ";" + juce::String(point.second, 6) + "\n";
+        state.setProperty("curveData", curveData, nullptr);
+    }
+
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    if (xml)
+    {
+        auto file = getPresetFile(name);
+        xml->writeTo(file);
+        currentPresetName = name;
+    }
+}
+
+void PresetManager::loadPreset(const juce::String& name)
+{
+    auto file = getPresetFile(name);
+    if (!file.existsAsFile())
+        return;
+
+    std::unique_ptr<juce::XmlElement> xml = juce::XmlDocument::parse(file);
+    if (xml && xml->hasTagName(apvts.state.getType()))
+    {
+        auto state = juce::ValueTree::fromXml(*xml);
+        apvts.replaceState(state);
+
+        // Load curve data
+        juce::String curveData = state.getProperty("curveData", "");
+        if (curveData.isNotEmpty())
+        {
+            auto result = CSVParser::parseString(curveData);
+            if (result.success)
+                setCurve(result.points);
+        }
+        else
+        {
+            setCurve({});  // Clear curve if no data
+        }
+
+        currentPresetName = name;
+    }
+}
+
+void PresetManager::deletePreset(const juce::String& name)
+{
+    auto file = getPresetFile(name);
+    if (file.existsAsFile())
+        file.deleteFile();
+
+    if (currentPresetName == name)
+        currentPresetName.clear();
+}
+
+juce::StringArray PresetManager::getPresetList() const
+{
+    juce::StringArray presets;
+    auto dir = getPresetDirectory();
+
+    for (const auto& file : dir.findChildFiles(juce::File::findFiles, false, "*.xml"))
+        presets.add(file.getFileNameWithoutExtension());
+
+    presets.sort(true);
+    return presets;
+}
+
+//==============================================================================
 // Plugin Processor Implementation
 //==============================================================================
 PhaseCorrectorAudioProcessor::PhaseCorrectorAudioProcessor()
     : AudioProcessor(BusesProperties()
                      .withInput("Input", juce::AudioChannelSet::stereo(), true)
                      .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts(*this, nullptr, "Parameters", createParameterLayout())
+      apvts(*this, nullptr, "Parameters", createParameterLayout()),
+      presetManager(apvts,
+                    [this]() { return getCurrentCurvePoints(); },
+                    [this](const std::vector<std::pair<double, double>>& pts) { setCurvePoints(pts); })
 {
     apvts.addParameterListener("oversample", this);
     apvts.addParameterListener("ovsMode", this);

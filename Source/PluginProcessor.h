@@ -78,6 +78,83 @@ private:
 };
 
 //==============================================================================
+// Fast Math Approximations for Real-time Audio
+//==============================================================================
+namespace FastMath
+{
+    // Fast inverse square root (Quake III style, improved)
+    inline float fastInvSqrt(float x)
+    {
+        float xhalf = 0.5f * x;
+        int i = *(int*)&x;
+        i = 0x5f375a86 - (i >> 1);
+        x = *(float*)&i;
+        x = x * (1.5f - xhalf * x * x);  // One Newton-Raphson iteration
+        return x;
+    }
+
+    // Fast square root using fast inverse sqrt
+    inline float fastSqrt(float x)
+    {
+        if (x <= 0.0f) return 0.0f;
+        return x * fastInvSqrt(x);
+    }
+
+    // Fast atan2 approximation (max error ~0.01 radians)
+    inline float fastAtan2(float y, float x)
+    {
+        const float PI = 3.14159265358979f;
+        const float PI_2 = 1.57079632679489f;
+
+        if (x == 0.0f)
+        {
+            if (y > 0.0f) return PI_2;
+            if (y < 0.0f) return -PI_2;
+            return 0.0f;
+        }
+
+        float abs_y = std::abs(y) + 1e-10f;  // Prevent division by zero
+        float angle;
+
+        if (x >= 0.0f)
+        {
+            float r = (x - abs_y) / (x + abs_y);
+            angle = 0.1963f * r * r * r - 0.9817f * r + PI / 4.0f;
+        }
+        else
+        {
+            float r = (x + abs_y) / (abs_y - x);
+            angle = 0.1963f * r * r * r - 0.9817f * r + 3.0f * PI / 4.0f;
+        }
+
+        return (y < 0.0f) ? -angle : angle;
+    }
+
+    // Fast sin approximation using parabola (max error ~0.001)
+    inline float fastSin(float x)
+    {
+        const float PI = 3.14159265358979f;
+        const float TWO_PI = 6.28318530717959f;
+
+        // Normalize to [-PI, PI]
+        x = std::fmod(x + PI, TWO_PI) - PI;
+
+        const float B = 4.0f / PI;
+        const float C = -4.0f / (PI * PI);
+        const float P = 0.225f;
+
+        float y = B * x + C * x * std::abs(x);
+        return P * (y * std::abs(y) - y) + y;
+    }
+
+    // Fast cos using sin
+    inline float fastCos(float x)
+    {
+        return fastSin(x + 1.57079632679489f);
+    }
+}
+
+//==============================================================================
 // FFT-based Phase Processor with Overlap-Add
 //==============================================================================
 class PhaseProcessor
@@ -131,6 +208,7 @@ public:
 private:
     void rebuildPhaseTable();
     void processFrame(int channel);
+    void processFrameBypass(int channel);  // Fast path when no phase processing needed
     void reconfigure();  // Rebuilds FFT, windows, buffers
     void buildWindows();
 
@@ -283,6 +361,37 @@ private:
 };
 
 //==============================================================================
+// Preset Manager
+//==============================================================================
+class PresetManager
+{
+public:
+    PresetManager(juce::AudioProcessorValueTreeState& apvts,
+                  std::function<std::vector<std::pair<double, double>>()> getCurveFunc,
+                  std::function<void(const std::vector<std::pair<double, double>>&)> setCurveFunc);
+
+    void savePreset(const juce::String& name);
+    void loadPreset(const juce::String& name);
+    void deletePreset(const juce::String& name);
+
+    juce::StringArray getPresetList() const;
+    juce::File getPresetDirectory() const;
+
+    int getCurrentPresetIndex() const { return currentPresetIndex; }
+    juce::String getCurrentPresetName() const { return currentPresetName; }
+
+private:
+    juce::AudioProcessorValueTreeState& apvts;
+    std::function<std::vector<std::pair<double, double>>()> getCurve;
+    std::function<void(const std::vector<std::pair<double, double>>&)> setCurve;
+
+    int currentPresetIndex = -1;
+    juce::String currentPresetName;
+
+    juce::File getPresetFile(const juce::String& name) const;
+};
+
+//==============================================================================
 // Main Plugin Processor
 //==============================================================================
 class PhaseCorrectorAudioProcessor : public juce::AudioProcessor,
@@ -328,6 +437,7 @@ public:
     // Access for visualization
     const NyquistFilter& getNyquistFilter() const { return nyquistFilter; }
     const PhaseProcessor& getPhaseProcessor() const { return phaseProcessor; }
+    PresetManager& getPresetManager() { return presetManager; }
 
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
@@ -339,6 +449,9 @@ private:
     OversamplingManager oversamplingManager;
     NyquistFilter nyquistFilter;
     juce::dsp::Gain<float> outputGain;
+
+    // Preset Manager
+    PresetManager presetManager;
 
     // State
     std::vector<std::pair<double, double>> currentCurvePoints;

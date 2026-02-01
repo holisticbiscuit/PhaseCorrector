@@ -182,6 +182,12 @@ private:
     juce::TextButton clearButton;
     juce::TextButton invertButton;
 
+    // Preset controls
+    juce::ComboBox presetBox;
+    juce::TextButton savePresetButton;
+    juce::TextButton deletePresetButton;
+    void refreshPresetList();
+
     // Labels
     juce::Label titleLabel;
     juce::Label oversampleLabel;

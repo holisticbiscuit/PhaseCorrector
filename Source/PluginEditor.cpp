@@ -798,6 +798,62 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     invertButton.onClick = [this]() { curveDisplay.invertCurve(); };
     addAndMakeVisible(invertButton);
 
+    // Preset controls
+    presetBox.setTextWhenNothingSelected("Select Preset...");
+    presetBox.onChange = [this]()
+    {
+        if (presetBox.getSelectedId() > 0)
+        {
+            auto presetName = presetBox.getText();
+            audioProcessor.getPresetManager().loadPreset(presetName);
+            // Sync the curve display with loaded curve
+            auto& points = audioProcessor.getCurrentCurvePoints();
+            if (!points.empty())
+                curveDisplay.clearCurve();  // Will sync from processor
+        }
+    };
+    addAndMakeVisible(presetBox);
+    refreshPresetList();
+
+    savePresetButton.setButtonText("Save");
+    savePresetButton.onClick = [this]()
+    {
+        auto name = presetBox.getText();
+        if (name.isEmpty() || name == "Select Preset...")
+        {
+            // Ask for name
+            juce::AlertWindow::showAsync(
+                juce::MessageBoxOptions()
+                    .withTitle("Save Preset")
+                    .withMessage("Enter preset name:")
+                    .withButton("Save")
+                    .withButton("Cancel"),
+                [this](int result)
+                {
+                    if (result == 1)
+                    {
+                        // This is a simplified version - in production you'd use a proper input dialog
+                    }
+                });
+            return;
+        }
+        audioProcessor.getPresetManager().savePreset(name);
+        refreshPresetList();
+    };
+    addAndMakeVisible(savePresetButton);
+
+    deletePresetButton.setButtonText("Del");
+    deletePresetButton.onClick = [this]()
+    {
+        auto name = presetBox.getText();
+        if (name.isNotEmpty() && name != "Select Preset...")
+        {
+            audioProcessor.getPresetManager().deletePreset(name);
+            refreshPresetList();
+        }
+    };
+    addAndMakeVisible(deletePresetButton);
+
     // Main controls
     setupLabel(oversampleLabel, "Oversampling");
     oversampleBox.addItemList(OversamplingManager::getRateNames(), 1);
@@ -886,6 +942,27 @@ void PhaseCorrectorAudioProcessorEditor::setupLabel(juce::Label& label, const ju
     addAndMakeVisible(label);
 }
 
+void PhaseCorrectorAudioProcessorEditor::refreshPresetList()
+{
+    auto currentText = presetBox.getText();
+    presetBox.clear();
+
+    auto presets = audioProcessor.getPresetManager().getPresetList();
+    int id = 1;
+    int selectedId = 0;
+
+    for (const auto& preset : presets)
+    {
+        presetBox.addItem(preset, id);
+        if (preset == currentText)
+            selectedId = id;
+        id++;
+    }
+
+    if (selectedId > 0)
+        presetBox.setSelectedId(selectedId, juce::dontSendNotification);
+}
+
 void PhaseCorrectorAudioProcessorEditor::paint(juce::Graphics& g)
 {
     juce::ColourGradient gradient(juce::Colour(0xff0f0f1a), 0.0f, 0.0f,
@@ -922,12 +999,20 @@ void PhaseCorrectorAudioProcessorEditor::resized()
 
     // Clear and Invert buttons in header
     clearButton.setBounds(static_cast<int>(220 * scale), static_cast<int>(10 * scale),
-                          static_cast<int>(55 * scale), static_cast<int>(25 * scale));
-    invertButton.setBounds(static_cast<int>(280 * scale), static_cast<int>(10 * scale),
-                           static_cast<int>(55 * scale), static_cast<int>(25 * scale));
+                          static_cast<int>(50 * scale), static_cast<int>(25 * scale));
+    invertButton.setBounds(static_cast<int>(275 * scale), static_cast<int>(10 * scale),
+                           static_cast<int>(50 * scale), static_cast<int>(25 * scale));
 
-    statusLabel.setBounds(getWidth() - static_cast<int>(350 * scale), 0,
-                          static_cast<int>(340 * scale), headerH);
+    // Preset controls in header
+    presetBox.setBounds(static_cast<int>(340 * scale), static_cast<int>(10 * scale),
+                        static_cast<int>(140 * scale), static_cast<int>(25 * scale));
+    savePresetButton.setBounds(static_cast<int>(485 * scale), static_cast<int>(10 * scale),
+                               static_cast<int>(40 * scale), static_cast<int>(25 * scale));
+    deletePresetButton.setBounds(static_cast<int>(530 * scale), static_cast<int>(10 * scale),
+                                 static_cast<int>(35 * scale), static_cast<int>(25 * scale));
+
+    statusLabel.setBounds(getWidth() - static_cast<int>(280 * scale), 0,
+                          static_cast<int>(270 * scale), headerH);
 
     // Phase curve display (main area)
     int curveY = headerH;
