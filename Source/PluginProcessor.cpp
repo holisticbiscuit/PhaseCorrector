@@ -334,11 +334,11 @@ void PhaseProcessor::reconfigure()
     int analysisOrder;
     switch (currentQuality)
     {
-        case Quality::Low:      analysisOrder = 10; break;  // 1024
-        case Quality::Medium:   analysisOrder = 11; break;  // 2048
-        case Quality::High:     analysisOrder = 12; break;  // 4096
-        case Quality::VeryHigh: analysisOrder = 13; break;  // 8192
-        case Quality::Extreme:  analysisOrder = 14; break;  // 16384
+        case Quality::Low:      analysisOrder = 10; break;  // 1024 analysis, 2048 FFT
+        case Quality::Medium:   analysisOrder = 11; break;  // 2048 analysis, 4096 FFT
+        case Quality::High:     analysisOrder = 12; break;  // 4096 analysis, 8192 FFT
+        case Quality::VeryHigh: analysisOrder = 13; break;  // 8192 analysis, 16384 FFT
+        case Quality::Extreme:  analysisOrder = 15; break;  // 32768 analysis, 65536 FFT
         default:                analysisOrder = 12; break;
     }
 
@@ -1195,19 +1195,23 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
     }
     else if (parameterID == "fftQuality")
     {
-        phaseProcessor.setQuality(static_cast<PhaseProcessor::Quality>(static_cast<int>(newValue)));
-        // Update latency reporting to host (convert oversampled to base samples)
+        auto newQuality = static_cast<PhaseProcessor::Quality>(static_cast<int>(newValue));
+        phaseProcessor.setQuality(newQuality);
+        // Update latency reporting immediately using expected latency for new quality
         int ovsFactor = oversamplingManager.getFactor();
-        int phaseLatencyBaseSamples = phaseProcessor.getLatencySamples() / ovsFactor;
+        int expectedLatency = PhaseProcessor::getLatencyForQuality(newQuality);
+        int phaseLatencyBaseSamples = expectedLatency / ovsFactor;
         setLatencySamples(phaseLatencyBaseSamples +
                           static_cast<int>(oversamplingManager.getLatencySamples()));
     }
     else if (parameterID == "fftOverlap")
     {
         phaseProcessor.setOverlap(static_cast<PhaseProcessor::Overlap>(static_cast<int>(newValue)));
-        // Update latency reporting to host (convert oversampled to base samples)
+        // Overlap doesn't change latency (analysisSize stays same), but recalc anyway
         int ovsFactor = oversamplingManager.getFactor();
-        int phaseLatencyBaseSamples = phaseProcessor.getLatencySamples() / ovsFactor;
+        auto currentQuality = phaseProcessor.getQuality();
+        int expectedLatency = PhaseProcessor::getLatencyForQuality(currentQuality);
+        int phaseLatencyBaseSamples = expectedLatency / ovsFactor;
         setLatencySamples(phaseLatencyBaseSamples +
                           static_cast<int>(oversamplingManager.getLatencySamples()));
     }

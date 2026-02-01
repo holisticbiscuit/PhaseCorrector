@@ -161,13 +161,14 @@ class PhaseProcessor
 {
 public:
     // Quality levels - determines FFT size and frequency resolution
+    // Analysis size determines latency, FFT size = 2x analysis (zero-padding)
     enum class Quality
     {
-        Low = 0,      // 2048 FFT, ~43 Hz resolution @ 44.1k
-        Medium = 1,   // 4096 FFT, ~21 Hz resolution
-        High = 2,     // 8192 FFT, ~10.7 Hz resolution (default)
-        VeryHigh = 3, // 16384 FFT, ~5.4 Hz resolution
-        Extreme = 4   // 32768 FFT, ~2.7 Hz resolution
+        Low = 0,      // 1024 analysis, 2048 FFT, ~43 Hz resolution @ 44.1k
+        Medium = 1,   // 2048 analysis, 4096 FFT, ~21 Hz resolution
+        High = 2,     // 4096 analysis, 8192 FFT, ~10.7 Hz resolution (default)
+        VeryHigh = 3, // 8192 analysis, 16384 FFT, ~5.4 Hz resolution
+        Extreme = 4   // 16384 analysis, 32768 FFT, ~2.7 Hz resolution
     };
 
     // Overlap amount - affects latency and quality
@@ -194,8 +195,22 @@ public:
     Quality getQuality() const { return currentQuality; }
     Overlap getOverlap() const { return currentOverlap; }
 
-    // Get current latency in samples
+    // Get current latency in samples (at oversampled rate)
     int getLatencySamples() const { return analysisSize; }
+
+    // Calculate expected latency for given quality (at oversampled rate)
+    static int getLatencyForQuality(Quality q)
+    {
+        switch (q)
+        {
+            case Quality::Low:      return 1024;
+            case Quality::Medium:   return 2048;
+            case Quality::High:     return 4096;
+            case Quality::VeryHigh: return 8192;
+            case Quality::Extreme:  return 32768;
+            default:                return 4096;
+        }
+    }
 
     const std::vector<float>& getPhaseTable() const { return phaseTable; }
     double getSampleRate() const { return currentSampleRate; }
