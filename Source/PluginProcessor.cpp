@@ -367,7 +367,7 @@ void PhaseProcessor::reconfigure()
     // Resize buffers - need extra space for overlap-add
     int bufferSize = fftSize * 2;  // Extra space for safety
     for (auto& ch : channels)
-        ch.resize(bufferSize, hopSize);
+        ch.resize(bufferSize, fftSize, hopSize);
 
     // Resize phase table
     phaseTable.resize(fftSize / 2 + 1, 0.0f);
@@ -503,47 +503,48 @@ void PhaseProcessor::processFrame(int channel)
     if (readPos < 0)
         readPos += bufferSize;
 
-    // Prepare FFT buffer - use heap allocation for large FFT sizes
-    std::vector<float> fftData(fftSize * 2, 0.0f);
+    // Use pre-allocated FFT buffer
+    float* fftData = ch.fftBuffer.data();
 
-    // Apply analysis window
+    // Clear and apply analysis window
+    std::memset(fftData, 0, fftSize * 2 * sizeof(float));
     for (int i = 0; i < analysisSize; ++i)
     {
         int idx = (readPos + i) % bufferSize;
         fftData[i] = ch.inputBuffer[idx] * analysisWindow[i];
     }
-    // Zero-padding is already done by vector initialization
 
     // Forward FFT
-    fft->performRealOnlyForwardTransform(fftData.data());
+    fft->performRealOnlyForwardTransform(fftData);
 
-    // Apply phase modification
+    // Apply phase modification - optimized loop
     const int numBins = fftSize / 2;
+    const float* phasePtr = phaseTable.data();
+
     for (int bin = 1; bin < numBins; ++bin)
     {
-        float real = fftData[bin * 2];
-        float imag = fftData[bin * 2 + 1];
+        const int idx = bin * 2;
+        const float real = fftData[idx];
+        const float imag = fftData[idx + 1];
 
-        float magnitude = std::sqrt(real * real + imag * imag);
-        float phase = std::atan2(imag, real);
+        const float magnitude = std::sqrt(real * real + imag * imag);
+        const float phase = std::atan2(imag, real) + phasePtr[bin];
 
-        phase += phaseTable[bin];
-
-        fftData[bin * 2] = magnitude * std::cos(phase);
-        fftData[bin * 2 + 1] = magnitude * std::sin(phase);
+        fftData[idx] = magnitude * std::cos(phase);
+        fftData[idx + 1] = magnitude * std::sin(phase);
     }
 
     // Inverse FFT
-    fft->performRealOnlyInverseTransform(fftData.data());
+    fft->performRealOnlyInverseTransform(fftData);
 
     // Overlap-add with synthesis window
     int writePos = ch.outputReadPos;
+    const float compensation = windowCompensation;
 
     for (int i = 0; i < analysisSize; ++i)
     {
         int idx = (writePos + i) % bufferSize;
-        float windowedSample = fftData[i] * synthesisWindow[i] * windowCompensation;
-        ch.outputBuffer[idx] += windowedSample;
+        ch.outputBuffer[idx] += fftData[i] * synthesisWindow[i] * compensation;
     }
 }
 
@@ -695,7 +696,7 @@ OversamplingManager::OversamplingManager()
 
 void OversamplingManager::createOversampler()
 {
-    // Note: Caller must hold processingLock
+    // This should only be called from audio thread or during prepare
     int order = static_cast<int>(currentRate);
 
     // Reset and release old oversampler first
@@ -741,64 +742,68 @@ void OversamplingManager::createOversampler()
 
 void OversamplingManager::prepare(double sampleRate, int blockSize)
 {
-    juce::SpinLock::ScopedLockType lock(processingLock);
-
     baseSampleRate = sampleRate;
     baseBlockSize = blockSize;
-    isPrepared.store(false);
+    isPrepared = false;
+
+    // Clear any pending changes
+    pendingRate.store(-1);
+    pendingFilterMode.store(-1);
 
     createOversampler();
 
-    isPrepared.store(true);
+    isPrepared = true;
 }
 
 void OversamplingManager::reset()
 {
-    juce::SpinLock::ScopedLockType lock(processingLock);
     if (oversampler)
         oversampler->reset();
 }
 
 void OversamplingManager::setRate(Rate newRate)
 {
-    if (newRate != currentRate)
-    {
-        juce::SpinLock::ScopedLockType lock(processingLock);
-
-        currentRate = newRate;
-        isPrepared.store(false);
-        createOversampler();
-        isPrepared.store(true);
-
-        if (oversampler == nullptr && newRate != Rate::x1)
-        {
-            DBG("Failed to create oversampler at rate " << static_cast<int>(newRate) << ", falling back to 1x");
-        }
-    }
+    // Just store the pending change - it will be applied on audio thread
+    pendingRate.store(static_cast<int>(newRate));
 }
 
 void OversamplingManager::setFilterMode(FilterMode mode)
 {
-    if (mode != filterMode)
+    // Just store the pending change - it will be applied on audio thread
+    pendingFilterMode.store(static_cast<int>(mode));
+}
+
+bool OversamplingManager::applyPendingChanges()
+{
+    // This is called at the start of processBlock, on the audio thread
+    bool needsRecreate = false;
+
+    int newRate = pendingRate.exchange(-1);
+    if (newRate >= 0 && static_cast<Rate>(newRate) != currentRate)
     {
-        juce::SpinLock::ScopedLockType lock(processingLock);
-
-        filterMode = mode;
-
-        if (currentRate != Rate::x1)
-        {
-            isPrepared.store(false);
-            createOversampler();
-            isPrepared.store(true);
-        }
+        currentRate = static_cast<Rate>(newRate);
+        needsRecreate = true;
     }
+
+    int newMode = pendingFilterMode.exchange(-1);
+    if (newMode >= 0 && static_cast<FilterMode>(newMode) != filterMode)
+    {
+        filterMode = static_cast<FilterMode>(newMode);
+        if (currentRate != Rate::x1)
+            needsRecreate = true;
+    }
+
+    if (needsRecreate && isPrepared)
+    {
+        createOversampler();
+    }
+
+    return needsRecreate;
 }
 
 juce::dsp::AudioBlock<float> OversamplingManager::processSamplesUp(juce::dsp::AudioBlock<float>& inputBlock)
 {
-    juce::SpinLock::ScopedTryLockType lock(processingLock);
-
-    if (!lock.isLocked() || !isPrepared.load() || !oversampler || currentRate == Rate::x1)
+    if (!isPrepared || !oversampler || currentRate == Rate::x1)
         return inputBlock;
 
     try
@@ -813,9 +818,7 @@ juce::dsp::AudioBlock<float> OversamplingManager::processSamplesUp(juce::dsp::Au
 
 void OversamplingManager::processSamplesDown(juce::dsp::AudioBlock<float>& outputBlock)
 {
-    juce::SpinLock::ScopedTryLockType lock(processingLock);
-
-    if (!lock.isLocked() || !isPrepared.load() || !oversampler || currentRate == Rate::x1)
+    if (!isPrepared || !oversampler || currentRate == Rate::x1)
         return;
 
     try
@@ -953,17 +956,13 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
 {
     if (parameterID == "oversample")
     {
+        // Just set the pending rate - actual change happens on audio thread
         oversamplingManager.setRate(static_cast<OversamplingManager::Rate>(static_cast<int>(newValue)));
-        double effectiveSampleRate = lastSampleRate * oversamplingManager.getFactor();
-        phaseProcessor.prepare(effectiveSampleRate, lastBlockSize * oversamplingManager.getFactor());
-        nyquistFilter.prepare(effectiveSampleRate);
     }
     else if (parameterID == "ovsMode")
     {
+        // Just set the pending mode - actual change happens on audio thread
         oversamplingManager.setFilterMode(static_cast<OversamplingManager::FilterMode>(static_cast<int>(newValue)));
-        double effectiveSampleRate = lastSampleRate * oversamplingManager.getFactor();
-        phaseProcessor.prepare(effectiveSampleRate, lastBlockSize * oversamplingManager.getFactor());
-        nyquistFilter.prepare(effectiveSampleRate);
     }
     else if (parameterID == "outputGain")
     {
@@ -1063,6 +1062,20 @@ bool PhaseCorrectorAudioProcessor::isBusesLayoutSupported(const BusesLayout& lay
 void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
+
+    // Apply any pending oversampling changes safely on audio thread
+    if (oversamplingManager.applyPendingChanges())
+    {
+        // Oversampling rate changed - update dependent processors
+        double effectiveSampleRate = lastSampleRate * oversamplingManager.getFactor();
+        int effectiveBlockSize = lastBlockSize * oversamplingManager.getFactor();
+        phaseProcessor.prepare(effectiveSampleRate, effectiveBlockSize);
+        nyquistFilter.prepare(effectiveSampleRate);
+
+        // Update latency reporting
+        setLatencySamples(phaseProcessor.getLatencySamples() +
+                          static_cast<int>(oversamplingManager.getLatencySamples()));
+    }
 
     const int totalNumInputChannels = getTotalNumInputChannels();
     const int totalNumOutputChannels = getTotalNumOutputChannels();

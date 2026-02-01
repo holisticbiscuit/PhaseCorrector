@@ -140,14 +140,16 @@ private:
     {
         std::vector<float> inputBuffer;
         std::vector<float> outputBuffer;
+        std::vector<float> fftBuffer;  // Pre-allocated FFT workspace
         int inputWritePos = 0;
         int outputReadPos = 0;
         int samplesUntilNextFrame = 0;
 
-        void resize(int bufferSize, int hopSize)
+        void resize(int bufferSize, int fftSize, int hopSize)
         {
             inputBuffer.resize(bufferSize, 0.0f);
             outputBuffer.resize(bufferSize, 0.0f);
+            fftBuffer.resize(fftSize * 2, 0.0f);  // Real + imaginary
             inputWritePos = 0;
             outputReadPos = 0;
             samplesUntilNextFrame = hopSize;
@@ -247,6 +249,10 @@ public:
     void prepare(double sampleRate, int blockSize);
     void reset();
 
+    // Call this at the start of processBlock to apply any pending changes
+    // Returns true if rate/mode changed (dependents need update)
+    bool applyPendingChanges();
+
     juce::dsp::AudioBlock<float> processSamplesUp(juce::dsp::AudioBlock<float>& inputBlock);
     void processSamplesDown(juce::dsp::AudioBlock<float>& outputBlock);
 
@@ -266,14 +272,14 @@ private:
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
     Rate currentRate = Rate::x1;
     FilterMode filterMode = FilterMode::FIR;
-    std::atomic<bool> needsRebuild{false};
+
+    // Pending changes (set from GUI thread, applied on audio thread)
+    std::atomic<int> pendingRate{-1};      // -1 = no change pending
+    std::atomic<int> pendingFilterMode{-1}; // -1 = no change pending
 
     double baseSampleRate = 44100.0;
     int baseBlockSize = 512;
-    std::atomic<bool> isPrepared{false};
-
-    // Thread safety for oversampler access
-    juce::SpinLock processingLock;
+    bool isPrepared = false;
 };
 
 //==============================================================================
