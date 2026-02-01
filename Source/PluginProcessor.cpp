@@ -1196,15 +1196,19 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
     else if (parameterID == "fftQuality")
     {
         phaseProcessor.setQuality(static_cast<PhaseProcessor::Quality>(static_cast<int>(newValue)));
-        // Update latency reporting to host
-        setLatencySamples(phaseProcessor.getLatencySamples() +
+        // Update latency reporting to host (convert oversampled to base samples)
+        int ovsFactor = oversamplingManager.getFactor();
+        int phaseLatencyBaseSamples = phaseProcessor.getLatencySamples() / ovsFactor;
+        setLatencySamples(phaseLatencyBaseSamples +
                           static_cast<int>(oversamplingManager.getLatencySamples()));
     }
     else if (parameterID == "fftOverlap")
     {
         phaseProcessor.setOverlap(static_cast<PhaseProcessor::Overlap>(static_cast<int>(newValue)));
-        // Update latency reporting to host
-        setLatencySamples(phaseProcessor.getLatencySamples() +
+        // Update latency reporting to host (convert oversampled to base samples)
+        int ovsFactor = oversamplingManager.getFactor();
+        int phaseLatencyBaseSamples = phaseProcessor.getLatencySamples() / ovsFactor;
+        setLatencySamples(phaseLatencyBaseSamples +
                           static_cast<int>(oversamplingManager.getLatencySamples()));
     }
     else if (parameterID == "nyquistFreq" || parameterID == "nyquistQ" || parameterID == "nyquistSlope")
@@ -1260,8 +1264,12 @@ void PhaseCorrectorAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     outputGain.setGainDecibels(apvts.getRawParameterValue("outputGain")->load());
 
     // Report total latency to host for PDC
-    setLatencySamples(phaseProcessor.getLatencySamples() +
-                      static_cast<int>(oversamplingManager.getLatencySamples()));
+    // Phase processor latency is in oversampled samples - convert to base samples
+    int ovsFactor = oversamplingManager.getFactor();
+    int phaseLatencyBaseSamples = phaseProcessor.getLatencySamples() / ovsFactor;
+    // Oversampler latency is already reported in base samples by JUCE
+    int oversamplerLatency = static_cast<int>(oversamplingManager.getLatencySamples());
+    setLatencySamples(phaseLatencyBaseSamples + oversamplerLatency);
 }
 
 void PhaseCorrectorAudioProcessor::releaseResources()
@@ -1288,14 +1296,16 @@ void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
     if (oversamplingManager.applyPendingChanges())
     {
         // Oversampling rate changed - update dependent processors
-        double effectiveSampleRate = lastSampleRate * oversamplingManager.getFactor();
-        int effectiveBlockSize = lastBlockSize * oversamplingManager.getFactor();
+        int ovsFactor = oversamplingManager.getFactor();
+        double effectiveSampleRate = lastSampleRate * ovsFactor;
+        int effectiveBlockSize = lastBlockSize * ovsFactor;
         phaseProcessor.prepare(effectiveSampleRate, effectiveBlockSize);
         nyquistFilter.prepare(effectiveSampleRate);
 
-        // Update latency reporting
-        setLatencySamples(phaseProcessor.getLatencySamples() +
-                          static_cast<int>(oversamplingManager.getLatencySamples()));
+        // Update latency reporting (convert oversampled latency to base samples)
+        int phaseLatencyBaseSamples = phaseProcessor.getLatencySamples() / ovsFactor;
+        int oversamplerLatency = static_cast<int>(oversamplingManager.getLatencySamples());
+        setLatencySamples(phaseLatencyBaseSamples + oversamplerLatency);
     }
 
     const int totalNumInputChannels = getTotalNumInputChannels();
