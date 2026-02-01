@@ -165,6 +165,7 @@ private:
 
     // Main controls
     juce::ComboBox oversampleBox;
+    juce::ComboBox ovsModeBox;
     juce::Slider dryWetSlider;
     juce::Slider outputGainSlider;
     juce::Slider depthSlider;
@@ -182,6 +183,7 @@ private:
     // Labels
     juce::Label titleLabel;
     juce::Label oversampleLabel;
+    juce::Label ovsModeLabel;
     juce::Label dryWetLabel;
     juce::Label outputGainLabel;
     juce::Label depthLabel;
@@ -193,6 +195,7 @@ private:
 
     // Parameter attachments
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> oversampleAttachment;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> ovsModeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> dryWetAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outputGainAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> depthAttachment;

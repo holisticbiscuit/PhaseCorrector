@@ -805,6 +805,12 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     oversampleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
         audioProcessor.getAPVTS(), "oversample", oversampleBox);
 
+    setupLabel(ovsModeLabel, "OVS Filter");
+    ovsModeBox.addItemList(OversamplingManager::getFilterModeNames(), 1);
+    addAndMakeVisible(ovsModeBox);
+    ovsModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        audioProcessor.getAPVTS(), "ovsMode", ovsModeBox);
+
     setupLabel(depthLabel, "Depth");
     setupSlider(depthSlider, "%");
     depthAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
@@ -934,11 +940,18 @@ void PhaseCorrectorAudioProcessorEditor::resized()
     int y = controlsY + static_cast<int>(5 * scale);
 
     // Oversampling
-    oversampleLabel.setBounds(x, y, static_cast<int>(90 * scale), labelH);
-    oversampleBox.setBounds(x, y + labelH + 2, static_cast<int>(90 * scale),
+    oversampleLabel.setBounds(x, y, static_cast<int>(70 * scale), labelH);
+    oversampleBox.setBounds(x, y + labelH + 2, static_cast<int>(70 * scale),
                             static_cast<int>(25 * scale));
 
-    x += static_cast<int>(100 * scale) + spacing;
+    x += static_cast<int>(75 * scale);
+
+    // OVS Filter Mode (FIR/IIR)
+    ovsModeLabel.setBounds(x, y, static_cast<int>(70 * scale), labelH);
+    ovsModeBox.setBounds(x, y + labelH + 2, static_cast<int>(70 * scale),
+                         static_cast<int>(25 * scale));
+
+    x += static_cast<int>(75 * scale) + spacing;
 
     // Depth
     depthLabel.setBounds(x, y, knobSize, labelH);

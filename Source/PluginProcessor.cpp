@@ -577,47 +577,71 @@ CSVParser::ParseResult CSVParser::parseString(const juce::String& content)
 //==============================================================================
 OversamplingManager::OversamplingManager()
 {
-    createOversampler();
+    // Don't create oversampler in constructor - wait for prepare()
 }
 
 void OversamplingManager::createOversampler()
 {
+    // Note: Caller must hold processingLock
     int order = static_cast<int>(currentRate);
 
-    if (order == 0)
+    // Reset and release old oversampler first
+    if (oversampler)
     {
+        oversampler->reset();
         oversampler.reset();
-        return;
     }
 
-    // Always use linear phase FIR filters for best quality
-    // filterHalfBandFIREquiripple provides linear phase response
+    if (order == 0)
+        return;
+
+    // Select filter type based on mode
+    auto filterType = (filterMode == FilterMode::FIR)
+        ? juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple
+        : juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR;
+
     try
     {
-        oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
-            2, order, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true);
+        // Create new oversampler with 2 channels
+        oversampler = std::make_unique<juce::dsp::Oversampling<float>>(2, order, filterType, true);
+
+        // Initialize with current block size
+        if (baseBlockSize > 0)
+        {
+            size_t maxBlockSize = static_cast<size_t>(baseBlockSize);
+            oversampler->initProcessing(maxBlockSize);
+        }
+    }
+    catch (const std::exception&)
+    {
+        DBG("Oversampler creation failed");
+        oversampler.reset();
+        currentRate = Rate::x1;
     }
     catch (...)
     {
-        // Fallback to IIR if FIR fails (shouldn't happen but safety first)
-        oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
-            2, order, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true);
+        DBG("Oversampler creation failed with unknown error");
+        oversampler.reset();
+        currentRate = Rate::x1;
     }
 }
 
 void OversamplingManager::prepare(double sampleRate, int blockSize)
 {
+    juce::SpinLock::ScopedLockType lock(processingLock);
+
     baseSampleRate = sampleRate;
     baseBlockSize = blockSize;
+    isPrepared.store(false);
 
     createOversampler();
 
-    if (oversampler)
-        oversampler->initProcessing(static_cast<size_t>(blockSize));
+    isPrepared.store(true);
 }
 
 void OversamplingManager::reset()
 {
+    juce::SpinLock::ScopedLockType lock(processingLock);
     if (oversampler)
         oversampler->reset();
 }
@@ -626,27 +650,69 @@ void OversamplingManager::setRate(Rate newRate)
 {
     if (newRate != currentRate)
     {
+        juce::SpinLock::ScopedLockType lock(processingLock);
+
         currentRate = newRate;
+        isPrepared.store(false);
         createOversampler();
-        if (oversampler)
-            oversampler->initProcessing(static_cast<size_t>(baseBlockSize));
+        isPrepared.store(true);
+
+        if (oversampler == nullptr && newRate != Rate::x1)
+        {
+            DBG("Failed to create oversampler at rate " << static_cast<int>(newRate) << ", falling back to 1x");
+        }
+    }
+}
+
+void OversamplingManager::setFilterMode(FilterMode mode)
+{
+    if (mode != filterMode)
+    {
+        juce::SpinLock::ScopedLockType lock(processingLock);
+
+        filterMode = mode;
+
+        if (currentRate != Rate::x1)
+        {
+            isPrepared.store(false);
+            createOversampler();
+            isPrepared.store(true);
+        }
     }
 }
 
 juce::dsp::AudioBlock<float> OversamplingManager::processSamplesUp(juce::dsp::AudioBlock<float>& inputBlock)
 {
-    if (!oversampler || currentRate == Rate::x1)
+    juce::SpinLock::ScopedTryLockType lock(processingLock);
+
+    if (!lock.isLocked() || !isPrepared.load() || !oversampler || currentRate == Rate::x1)
         return inputBlock;
 
-    return oversampler->processSamplesUp(inputBlock);
+    try
+    {
+        return oversampler->processSamplesUp(inputBlock);
+    }
+    catch (...)
+    {
+        return inputBlock;
+    }
 }
 
 void OversamplingManager::processSamplesDown(juce::dsp::AudioBlock<float>& outputBlock)
 {
-    if (!oversampler || currentRate == Rate::x1)
+    juce::SpinLock::ScopedTryLockType lock(processingLock);
+
+    if (!lock.isLocked() || !isPrepared.load() || !oversampler || currentRate == Rate::x1)
         return;
 
-    oversampler->processSamplesDown(outputBlock);
+    try
+    {
+        oversampler->processSamplesDown(outputBlock);
+    }
+    catch (...)
+    {
+        // Silently fail - audio passes through unprocessed
+    }
 }
 
 float OversamplingManager::getLatencySamples() const
@@ -662,6 +728,11 @@ juce::StringArray OversamplingManager::getRateNames()
     return { "1x (Off)", "2x", "4x", "8x", "16x", "32x", "64x" };
 }
 
+juce::StringArray OversamplingManager::getFilterModeNames()
+{
+    return { "Linear Phase (FIR)", "Minimum Phase (IIR)" };
+}
+
 //==============================================================================
 // Plugin Processor Implementation
 //==============================================================================
@@ -672,6 +743,7 @@ PhaseCorrectorAudioProcessor::PhaseCorrectorAudioProcessor()
       apvts(*this, nullptr, "Parameters", createParameterLayout())
 {
     apvts.addParameterListener("oversample", this);
+    apvts.addParameterListener("ovsMode", this);
     apvts.addParameterListener("dryWet", this);
     apvts.addParameterListener("outputGain", this);
     apvts.addParameterListener("depth", this);
@@ -684,6 +756,7 @@ PhaseCorrectorAudioProcessor::PhaseCorrectorAudioProcessor()
 PhaseCorrectorAudioProcessor::~PhaseCorrectorAudioProcessor()
 {
     apvts.removeParameterListener("oversample", this);
+    apvts.removeParameterListener("ovsMode", this);
     apvts.removeParameterListener("dryWet", this);
     apvts.removeParameterListener("outputGain", this);
     apvts.removeParameterListener("depth", this);
@@ -701,6 +774,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout PhaseCorrectorAudioProcessor
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("oversample", 1), "Oversampling",
         OversamplingManager::getRateNames(), 2)); // Default 4x
+
+    // Oversampling filter mode (FIR = linear phase, IIR = minimum phase)
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID("ovsMode", 1), "OVS Mode",
+        OversamplingManager::getFilterModeNames(), 0)); // Default FIR
 
     // Dry/Wet
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
@@ -749,6 +827,13 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
     if (parameterID == "oversample")
     {
         oversamplingManager.setRate(static_cast<OversamplingManager::Rate>(static_cast<int>(newValue)));
+        double effectiveSampleRate = lastSampleRate * oversamplingManager.getFactor();
+        phaseProcessor.prepare(effectiveSampleRate, lastBlockSize * oversamplingManager.getFactor());
+        nyquistFilter.prepare(effectiveSampleRate);
+    }
+    else if (parameterID == "ovsMode")
+    {
+        oversamplingManager.setFilterMode(static_cast<OversamplingManager::FilterMode>(static_cast<int>(newValue)));
         double effectiveSampleRate = lastSampleRate * oversamplingManager.getFactor();
         phaseProcessor.prepare(effectiveSampleRate, lastBlockSize * oversamplingManager.getFactor());
         nyquistFilter.prepare(effectiveSampleRate);

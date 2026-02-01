@@ -178,6 +178,12 @@ public:
         x64 = 6
     };
 
+    enum class FilterMode
+    {
+        FIR = 0,  // Linear phase
+        IIR = 1   // Minimum phase (lower CPU)
+    };
+
     OversamplingManager();
     ~OversamplingManager() = default;
 
@@ -188,22 +194,29 @@ public:
     void processSamplesDown(juce::dsp::AudioBlock<float>& outputBlock);
 
     void setRate(Rate newRate);
+    void setFilterMode(FilterMode mode);
     Rate getRate() const { return currentRate; }
+    FilterMode getFilterMode() const { return filterMode; }
     int getFactor() const { return 1 << static_cast<int>(currentRate); }
     float getLatencySamples() const;
 
     static juce::StringArray getRateNames();
+    static juce::StringArray getFilterModeNames();
 
 private:
     void createOversampler();
 
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
     Rate currentRate = Rate::x1;
-    Rate pendingRate = Rate::x1;
-    std::atomic<bool> needsUpdate{false};
+    FilterMode filterMode = FilterMode::FIR;
+    std::atomic<bool> needsRebuild{false};
 
     double baseSampleRate = 44100.0;
     int baseBlockSize = 512;
+    std::atomic<bool> isPrepared{false};
+
+    // Thread safety for oversampler access
+    juce::SpinLock processingLock;
 };
 
 //==============================================================================
