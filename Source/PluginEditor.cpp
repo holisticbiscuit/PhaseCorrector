@@ -91,7 +91,7 @@ void NyquistVisualizer::paint(juce::Graphics& g)
     }
 
     // dB grid
-    std::array<float, 5> dbs = { 0.0f, -6.0f, -12.0f, -24.0f, -36.0f };
+    std::array<float, 5> dbs = { 0.0f, -12.0f, -24.0f, -36.0f, -48.0f };
     for (float db : dbs)
     {
         float y = dbToY(db);
@@ -131,8 +131,8 @@ void NyquistVisualizer::paint(juce::Graphics& g)
     g.setColour(juce::Colours::grey);
     g.setFont(9.0f);
     g.drawText("0dB", 2, static_cast<int>(dbToY(0.0f)) - 6, 30, 12, juce::Justification::left);
-    g.drawText("-12", 2, static_cast<int>(dbToY(-12.0f)) - 6, 30, 12, juce::Justification::left);
     g.drawText("-24", 2, static_cast<int>(dbToY(-24.0f)) - 6, 30, 12, juce::Justification::left);
+    g.drawText("-48", 2, static_cast<int>(dbToY(-48.0f)) - 6, 30, 12, juce::Justification::left);
 }
 
 void NyquistVisualizer::resized()

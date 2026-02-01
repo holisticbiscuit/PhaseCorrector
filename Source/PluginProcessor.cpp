@@ -272,8 +272,9 @@ PhaseProcessor::PhaseProcessor()
         synthesisWindow[i] = windowValue;
     }
 
-    // Window compensation for 4x overlap with Hann
-    windowCompensation = 2.0f / 3.0f * 2.0f;
+    // Window compensation for 4x overlap with Hann^2 (analysis * synthesis)
+    // Sum of Hann^2 at 75% overlap ≈ 1.5, so divide by 1.5
+    windowCompensation = 1.0f / 1.5f;  // ≈ 0.667
 
     phaseTable.resize(FFT_SIZE / 2 + 1, 0.0f);
 }
@@ -589,10 +590,16 @@ void OversamplingManager::createOversampler()
         return;
     }
 
-    // Always use FIR filters for maximum quality (linear phase, no ringing)
-    // filterHalfBandFIREquiripple provides the best stopband rejection
-    oversampler = std::make_unique<juce::dsp::Oversampling<float>>(
-        2, order, juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple, true);
+    // Use FIR for lower rates (best quality), IIR for very high rates (stability)
+    // FIR can be unstable or very CPU-heavy at order > 4 (16x+)
+    juce::dsp::Oversampling<float>::FilterType filterType;
+
+    if (order <= 4)  // Up to 16x: use high-quality FIR
+        filterType = juce::dsp::Oversampling<float>::filterHalfBandFIREquiripple;
+    else  // 32x, 64x: use IIR (stable, lower CPU)
+        filterType = juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR;
+
+    oversampler = std::make_unique<juce::dsp::Oversampling<float>>(2, order, filterType, true);
 }
 
 void OversamplingManager::prepare(double sampleRate, int blockSize)
@@ -714,10 +721,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout PhaseCorrectorAudioProcessor
     params.push_back(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID("nyquistEnabled", 1), "Nyquist Filter", true));
 
-    // Nyquist Frequency
+    // Nyquist Frequency (extended to 40kHz for high sample rates)
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID("nyquistFreq", 1), "Nyquist Freq",
-        juce::NormalisableRange<float>(1000.0f, 22000.0f, 1.0f, 0.3f), 18000.0f,
+        juce::NormalisableRange<float>(1000.0f, 40000.0f, 1.0f, 0.3f), 18000.0f,
         juce::AudioParameterFloatAttributes().withLabel("Hz")));
 
     // Nyquist Q

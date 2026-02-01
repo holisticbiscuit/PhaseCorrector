@@ -32,8 +32,8 @@ private:
     juce::Path responsePath;
 
     static constexpr float MIN_FREQ = 20.0f;
-    static constexpr float MAX_FREQ = 22000.0f;
-    static constexpr float MIN_DB = -36.0f;
+    static constexpr float MAX_FREQ = 40000.0f;
+    static constexpr float MIN_DB = -48.0f;
     static constexpr float MAX_DB = 6.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NyquistVisualizer)
