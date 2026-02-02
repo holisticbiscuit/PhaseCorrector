@@ -1,144 +1,11 @@
 /*
   ==============================================================================
     PhaseCorrector - Plugin Editor Implementation
-    Resizable UI with Nyquist filter visualization
+    Premium UI with liquid metal aesthetic
   ==============================================================================
 */
 
 #include "PluginEditor.h"
-
-//==============================================================================
-// Nyquist Filter Visualizer Implementation
-//==============================================================================
-NyquistVisualizer::NyquistVisualizer(PhaseCorrectorAudioProcessor& processor)
-    : audioProcessor(processor)
-{
-    startTimerHz(30);
-}
-
-NyquistVisualizer::~NyquistVisualizer()
-{
-    stopTimer();
-}
-
-void NyquistVisualizer::timerCallback()
-{
-    updateResponsePath();
-    repaint();
-}
-
-float NyquistVisualizer::freqToX(float freq) const
-{
-    float logMin = std::log10(MIN_FREQ);
-    float logMax = std::log10(MAX_FREQ);
-    float logFreq = std::log10(std::max(freq, MIN_FREQ));
-    return (logFreq - logMin) / (logMax - logMin) * static_cast<float>(getWidth());
-}
-
-float NyquistVisualizer::dbToY(float db) const
-{
-    float normalized = (db - MIN_DB) / (MAX_DB - MIN_DB);
-    return static_cast<float>(getHeight()) * (1.0f - normalized);
-}
-
-void NyquistVisualizer::updateResponsePath()
-{
-    responsePath.clear();
-
-    const auto& filter = audioProcessor.getNyquistFilter();
-    bool started = false;
-
-    for (int x = 0; x < getWidth(); ++x)
-    {
-        float logMin = std::log10(MIN_FREQ);
-        float logMax = std::log10(MAX_FREQ);
-        float logFreq = logMin + (static_cast<float>(x) / getWidth()) * (logMax - logMin);
-        float freq = std::pow(10.0f, logFreq);
-
-        float mag = filter.getMagnitudeAtFrequency(freq);
-        float db = (mag > 0.0f) ? 20.0f * std::log10(mag) : MIN_DB;
-        db = juce::jlimit(MIN_DB, MAX_DB, db);
-
-        float y = dbToY(db);
-
-        if (!started)
-        {
-            responsePath.startNewSubPath(static_cast<float>(x), y);
-            started = true;
-        }
-        else
-        {
-            responsePath.lineTo(static_cast<float>(x), y);
-        }
-    }
-}
-
-void NyquistVisualizer::paint(juce::Graphics& g)
-{
-    // Background
-    g.setColour(juce::Colour(0xff1a1a2e));
-    g.fillRoundedRectangle(getLocalBounds().toFloat(), 4.0f);
-
-    // Grid lines
-    g.setColour(juce::Colour(0xff2a2a4e));
-
-    // Frequency grid
-    std::array<float, 5> freqs = { 100.0f, 1000.0f, 5000.0f, 10000.0f, 20000.0f };
-    for (float freq : freqs)
-    {
-        float x = freqToX(freq);
-        g.drawVerticalLine(static_cast<int>(x), 0.0f, static_cast<float>(getHeight()));
-    }
-
-    // dB grid
-    std::array<float, 5> dbs = { 0.0f, -12.0f, -24.0f, -36.0f, -48.0f };
-    for (float db : dbs)
-    {
-        float y = dbToY(db);
-        if (db == 0.0f)
-            g.setColour(juce::Colour(0xff4a4a7e));
-        else
-            g.setColour(juce::Colour(0xff2a2a4e));
-        g.drawHorizontalLine(static_cast<int>(y), 0.0f, static_cast<float>(getWidth()));
-    }
-
-    // Draw response curve
-    bool enabled = audioProcessor.getAPVTS().getRawParameterValue("nyquistEnabled")->load() > 0.5f;
-
-    if (enabled)
-    {
-        // Glow effect
-        g.setColour(juce::Colour(0xffff6b6b).withAlpha(0.3f));
-        g.strokePath(responsePath, juce::PathStrokeType(4.0f));
-
-        g.setColour(juce::Colour(0xffff6b6b).withAlpha(0.6f));
-        g.strokePath(responsePath, juce::PathStrokeType(2.0f));
-
-        g.setColour(juce::Colour(0xffff6b6b));
-        g.strokePath(responsePath, juce::PathStrokeType(1.0f));
-    }
-    else
-    {
-        g.setColour(juce::Colour(0xff666666));
-        g.strokePath(responsePath, juce::PathStrokeType(1.0f));
-    }
-
-    // Border
-    g.setColour(juce::Colour(0xff4a4a7e));
-    g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 4.0f, 1.0f);
-
-    // Labels
-    g.setColour(juce::Colours::grey);
-    g.setFont(9.0f);
-    g.drawText("0dB", 2, static_cast<int>(dbToY(0.0f)) - 6, 30, 12, juce::Justification::left);
-    g.drawText("-24", 2, static_cast<int>(dbToY(-24.0f)) - 6, 30, 12, juce::Justification::left);
-    g.drawText("-48", 2, static_cast<int>(dbToY(-48.0f)) - 6, 30, 12, juce::Justification::left);
-}
-
-void NyquistVisualizer::resized()
-{
-    updateResponsePath();
-}
 
 //==============================================================================
 // Phase Curve Display Implementation with Drawing Support
@@ -438,10 +305,17 @@ void PhaseCurveDisplay::drawGrid(juce::Graphics& g)
         .withTrimmedTop(marginTop)
         .withTrimmedBottom(marginBottom);
 
-    g.setColour(juce::Colour(0xff1a1a2e));
+    // Liquid metal graph background - subtle gradient
+    juce::ColourGradient bgGradient(juce::Colour(0xff0c0c10), graphArea.getX(), graphArea.getY(),
+                                     juce::Colour(0xff080809), graphArea.getX(), graphArea.getBottom(), false);
+    g.setGradientFill(bgGradient);
     g.fillRoundedRectangle(graphArea.toFloat(), 5.0f);
 
-    g.setColour(juce::Colour(0xff2a2a4e));
+    // Very subtle top highlight
+    g.setColour(juce::Colour(0x08ffffff));
+    g.drawHorizontalLine(graphArea.getY() + 1, graphArea.getX() + 5.0f, graphArea.getRight() - 5.0f);
+
+    g.setColour(juce::Colour(0xff1a1a20));
 
     // Frequency grid
     std::array<float, 9> freqs = { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f };
@@ -458,20 +332,21 @@ void PhaseCurveDisplay::drawGrid(juce::Graphics& g)
     {
         float y = phaseToY(phase);
         if (std::abs(phase) < 0.01f)
-            g.setColour(juce::Colour(0xff4a4a7e));
+            g.setColour(juce::Colour(0xff2a2a35));  // Brighter center line
         else
-            g.setColour(juce::Colour(0xff2a2a4e));
+            g.setColour(juce::Colour(0xff1a1a20));
         g.drawHorizontalLine(static_cast<int>(y), static_cast<float>(marginLeft),
                              static_cast<float>(getWidth() - marginRight));
     }
 
-    g.setColour(juce::Colour(0xff4a4a7e));
+    // Border - subtle metallic edge
+    g.setColour(juce::Colour(0xff252530));
     g.drawRoundedRectangle(graphArea.toFloat(), 5.0f, 1.0f);
 }
 
 void PhaseCurveDisplay::drawFrequencyLabels(juce::Graphics& g)
 {
-    g.setColour(juce::Colours::lightgrey);
+    g.setColour(juce::Colour(0xff808088));
     g.setFont(static_cast<float>(getWidth()) / 80.0f);
 
     struct FreqLabel { float freq; const char* text; };
@@ -490,7 +365,7 @@ void PhaseCurveDisplay::drawFrequencyLabels(juce::Graphics& g)
 
 void PhaseCurveDisplay::drawPhaseLabels(juce::Graphics& g)
 {
-    g.setColour(juce::Colours::lightgrey);
+    g.setColour(juce::Colour(0xff808088));
     g.setFont(static_cast<float>(getWidth()) / 80.0f);
 
     struct PhaseLabel { float phase; const char* text; };
@@ -513,7 +388,7 @@ void PhaseCurveDisplay::drawCurve(juce::Graphics& g)
 
     if (points.empty())
     {
-        g.setColour(juce::Colours::grey);
+        g.setColour(juce::Colour(0xff505058));
         g.setFont(static_cast<float>(getWidth()) / 50.0f);
         g.drawText("Click and drag to draw phase curve, or drop CSV file",
                    getLocalBounds(), juce::Justification::centred);
@@ -539,15 +414,19 @@ void PhaseCurveDisplay::drawCurve(juce::Graphics& g)
         }
     }
 
-    // Glow effect
-    g.setColour(juce::Colour(0xff00ffaa).withAlpha(0.3f));
-    g.strokePath(curvePath, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved));
+    // Liquid metal curve effect - chrome/silver glow
+    g.setColour(juce::Colour(0xff505058).withAlpha(0.4f));
+    g.strokePath(curvePath, juce::PathStrokeType(6.0f, juce::PathStrokeType::curved));
 
-    g.setColour(juce::Colour(0xff00ffaa).withAlpha(0.5f));
-    g.strokePath(curvePath, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved));
+    g.setColour(juce::Colour(0xff808088).withAlpha(0.6f));
+    g.strokePath(curvePath, juce::PathStrokeType(4.0f, juce::PathStrokeType::curved));
 
-    g.setColour(juce::Colour(0xff00ffaa));
-    g.strokePath(curvePath, juce::PathStrokeType(1.5f, juce::PathStrokeType::curved));
+    g.setColour(juce::Colour(0xffa8a8b0));
+    g.strokePath(curvePath, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved));
+
+    // Bright highlight line
+    g.setColour(juce::Colour(0xffd0d0d8));
+    g.strokePath(curvePath, juce::PathStrokeType(1.0f, juce::PathStrokeType::curved));
 }
 
 void PhaseCurveDisplay::drawPoints(juce::Graphics& g)
@@ -560,8 +439,13 @@ void PhaseCurveDisplay::drawPoints(juce::Graphics& g)
             float x = logFreqToX(static_cast<float>(point.first));
             float y = phaseToY(static_cast<float>(point.second));
 
-            g.setColour(juce::Colour(0xff00ffaa).withAlpha(0.8f));
+            // Chrome point with subtle glow
+            g.setColour(juce::Colour(0xff404048));
+            g.fillEllipse(x - 4.0f, y - 4.0f, 8.0f, 8.0f);
+            g.setColour(juce::Colour(0xffc0c0c8));
             g.fillEllipse(x - 3.0f, y - 3.0f, 6.0f, 6.0f);
+            g.setColour(juce::Colour(0xffe8e8f0));
+            g.fillEllipse(x - 1.5f, y - 2.0f, 3.0f, 3.0f);
         }
     }
 }
@@ -578,7 +462,7 @@ void PhaseCurveDisplay::paint(juce::Graphics& g)
     const auto& points = editablePoints.empty() ? audioProcessor.getCurrentCurvePoints() : editablePoints;
     if (!points.empty())
     {
-        g.setColour(juce::Colours::grey);
+        g.setColour(juce::Colour(0xff606068));
         g.setFont(10.0f);
         g.drawText(juce::String(points.size()) + " points",
                    getWidth() - marginRight - 80, marginTop + 5, 75, 15,
@@ -591,10 +475,10 @@ void PhaseCurveDisplay::paint(juce::Graphics& g)
             .withTrimmedLeft(marginLeft).withTrimmedRight(marginRight)
             .withTrimmedTop(marginTop).withTrimmedBottom(marginBottom);
 
-        g.setColour(juce::Colour(0xff00ffaa).withAlpha(0.2f));
+        g.setColour(juce::Colour(0xffc0c0c8).withAlpha(0.15f));
         g.fillRoundedRectangle(graphArea.toFloat(), 5.0f);
 
-        g.setColour(juce::Colour(0xff00ffaa));
+        g.setColour(juce::Colour(0xffc0c0c8));
         g.setFont(16.0f);
         g.drawText("Drop CSV file here", getLocalBounds(), juce::Justification::centred);
     }
@@ -602,7 +486,7 @@ void PhaseCurveDisplay::paint(juce::Graphics& g)
     // Drawing indicator
     if (isDrawing)
     {
-        g.setColour(juce::Colour(0xffff6b6b));
+        g.setColour(juce::Colour(0xffc0c0c8));
         g.setFont(10.0f);
         g.drawText("Drawing...", marginLeft + 5, marginTop + 5, 60, 15, juce::Justification::left);
     }
@@ -659,23 +543,24 @@ void PhaseCurveDisplay::fileDragExit(const juce::StringArray&)
 }
 
 //==============================================================================
-// Look and Feel Implementation
+// Look and Feel Implementation - Liquid Metal Theme
 //==============================================================================
 PhaseCorrectorLookAndFeel::PhaseCorrectorLookAndFeel()
 {
-    accentColour = juce::Colour(0xff00ffaa);
-    backgroundColour = juce::Colour(0xff16162a);
+    // Liquid metal / chrome accent color
+    accentColour = juce::Colour(0xffa0a0a8);  // Silver/chrome
+    backgroundColour = juce::Colour(0xff0a0a0f);
 
     setColour(juce::Slider::rotarySliderFillColourId, accentColour);
-    setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff2a2a4e));
-    setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff1a1a2e));
-    setColour(juce::ComboBox::textColourId, juce::Colours::white);
-    setColour(juce::ComboBox::outlineColourId, juce::Colour(0xff4a4a7e));
+    setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff252530));
+    setColour(juce::ComboBox::backgroundColourId, juce::Colour(0xff101015));
+    setColour(juce::ComboBox::textColourId, juce::Colour(0xffc0c0c0));
+    setColour(juce::ComboBox::outlineColourId, juce::Colour(0xff353540));
     setColour(juce::ComboBox::arrowColourId, accentColour);
-    setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff1a1a2e));
-    setColour(juce::PopupMenu::textColourId, juce::Colours::white);
-    setColour(juce::PopupMenu::highlightedBackgroundColourId, accentColour.withAlpha(0.3f));
-    setColour(juce::Label::textColourId, juce::Colours::white);
+    setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff101015));
+    setColour(juce::PopupMenu::textColourId, juce::Colour(0xffc0c0c0));
+    setColour(juce::PopupMenu::highlightedBackgroundColourId, juce::Colour(0xff303040));
+    setColour(juce::Label::textColourId, juce::Colour(0xffc0c0c0));
 }
 
 void PhaseCorrectorLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
@@ -687,39 +572,52 @@ void PhaseCorrectorLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y
     const float centreY = static_cast<float>(y) + static_cast<float>(height) * 0.5f;
     const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
 
-    // Background arc
+    // Background arc - dark recessed look
     juce::Path backgroundArc;
     backgroundArc.addCentredArc(centreX, centreY, radius, radius, 0.0f,
                                  rotaryStartAngle, rotaryEndAngle, true);
-    g.setColour(juce::Colour(0xff2a2a4e));
+    g.setColour(juce::Colour(0xff1a1a20));
+    g.strokePath(backgroundArc, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved,
+                                                      juce::PathStrokeType::rounded));
+    g.setColour(juce::Colour(0xff252530));
     g.strokePath(backgroundArc, juce::PathStrokeType(4.0f, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
 
-    // Value arc
+    // Value arc - liquid metal gradient effect
     juce::Path valueArc;
     valueArc.addCentredArc(centreX, centreY, radius, radius, 0.0f,
                            rotaryStartAngle, angle, true);
-    g.setColour(accentColour);
-    g.strokePath(valueArc, juce::PathStrokeType(4.0f, juce::PathStrokeType::curved,
+
+    // Chrome/silver gradient on the value arc
+    g.setColour(juce::Colour(0xff606068));
+    g.strokePath(valueArc, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::rounded));
+    g.setColour(juce::Colour(0xffa0a0a8));
+    g.strokePath(valueArc, juce::PathStrokeType(3.0f, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::rounded));
+    g.setColour(juce::Colour(0xffd0d0d8));
+    g.strokePath(valueArc, juce::PathStrokeType(1.5f, juce::PathStrokeType::curved,
                                                  juce::PathStrokeType::rounded));
 
-    // Pointer
+    // Pointer - chrome needle
     juce::Path pointer;
     const float pointerLength = radius * 0.6f;
     const float pointerThickness = 3.0f;
     pointer.addRoundedRectangle(-pointerThickness * 0.5f, -radius + 4.0f,
                                  pointerThickness, pointerLength, 1.0f);
-    g.setColour(juce::Colours::white);
+    g.setColour(juce::Colour(0xffe0e0e8));
     g.fillPath(pointer, juce::AffineTransform::rotation(angle).translated(centreX, centreY));
 
-    // Center
-    g.setColour(juce::Colour(0xff1a1a2e));
+    // Center knob - metallic look
+    juce::ColourGradient knobGradient(juce::Colour(0xff303038), centreX - 6.0f, centreY - 6.0f,
+                                       juce::Colour(0xff181820), centreX + 6.0f, centreY + 6.0f, true);
+    g.setGradientFill(knobGradient);
     g.fillEllipse(centreX - 8.0f, centreY - 8.0f, 16.0f, 16.0f);
-    g.setColour(juce::Colour(0xff4a4a7e));
+    g.setColour(juce::Colour(0xff404048));
     g.drawEllipse(centreX - 8.0f, centreY - 8.0f, 16.0f, 16.0f, 1.0f);
 
     // Value text
-    g.setColour(juce::Colours::white);
+    g.setColour(juce::Colour(0xffa0a0a8));
     g.setFont(std::max(9.0f, static_cast<float>(width) / 7.0f));
     juce::String valueText = slider.getTextFromValue(slider.getValue());
     g.drawText(valueText, x, static_cast<int>(centreY + radius * 0.5f),
@@ -729,13 +627,22 @@ void PhaseCorrectorLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y
 void PhaseCorrectorLookAndFeel::drawComboBox(juce::Graphics& g, int width, int height, bool,
                                               int, int, int, int, juce::ComboBox& box)
 {
-    g.setColour(box.findColour(juce::ComboBox::backgroundColourId));
+    // Metallic combo box background
+    juce::ColourGradient bgGradient(juce::Colour(0xff181820), 0.0f, 0.0f,
+                                     juce::Colour(0xff101015), 0.0f, static_cast<float>(height), false);
+    g.setGradientFill(bgGradient);
     g.fillRoundedRectangle(0, 0, static_cast<float>(width), static_cast<float>(height), 4.0f);
 
-    g.setColour(box.findColour(juce::ComboBox::outlineColourId));
+    // Subtle inner shadow at top
+    g.setColour(juce::Colour(0x20000000));
+    g.drawHorizontalLine(1, 2.0f, static_cast<float>(width) - 2.0f);
+
+    // Border
+    g.setColour(juce::Colour(0xff353540));
     g.drawRoundedRectangle(0.5f, 0.5f, static_cast<float>(width) - 1.0f,
                             static_cast<float>(height) - 1.0f, 4.0f, 1.0f);
 
+    // Chrome arrow
     juce::Rectangle<int> arrowZone(width - 25, 0, 20, height);
     juce::Path path;
     path.startNewSubPath(static_cast<float>(arrowZone.getX()) + 3.0f,
@@ -745,7 +652,7 @@ void PhaseCorrectorLookAndFeel::drawComboBox(juce::Graphics& g, int width, int h
     path.lineTo(static_cast<float>(arrowZone.getRight()) - 3.0f,
                 static_cast<float>(arrowZone.getCentreY()) - 2.0f);
 
-    g.setColour(box.findColour(juce::ComboBox::arrowColourId));
+    g.setColour(juce::Colour(0xff808088));
     g.strokePath(path, juce::PathStrokeType(2.0f));
 }
 
@@ -754,13 +661,25 @@ void PhaseCorrectorLookAndFeel::drawToggleButton(juce::Graphics& g, juce::Toggle
 {
     auto bounds = button.getLocalBounds().toFloat().reduced(2.0f);
 
-    g.setColour(button.getToggleState() ? accentColour.withAlpha(0.3f) : juce::Colour(0xff1a1a2e));
+    // Metallic button background
+    if (button.getToggleState())
+    {
+        juce::ColourGradient activeGradient(juce::Colour(0xff404048), bounds.getX(), bounds.getY(),
+                                             juce::Colour(0xff252530), bounds.getX(), bounds.getBottom(), false);
+        g.setGradientFill(activeGradient);
+    }
+    else
+    {
+        g.setColour(juce::Colour(0xff101015));
+    }
     g.fillRoundedRectangle(bounds, 4.0f);
 
-    g.setColour(button.getToggleState() ? accentColour : juce::Colour(0xff4a4a7e));
-    g.drawRoundedRectangle(bounds, 4.0f, shouldDrawButtonAsHighlighted ? 2.0f : 1.0f);
+    // Border
+    g.setColour(button.getToggleState() ? juce::Colour(0xff606068) : juce::Colour(0xff353540));
+    g.drawRoundedRectangle(bounds, 4.0f, shouldDrawButtonAsHighlighted ? 1.5f : 1.0f);
 
-    g.setColour(button.getToggleState() ? juce::Colours::white : juce::Colours::grey);
+    // Text
+    g.setColour(button.getToggleState() ? juce::Colour(0xffd0d0d8) : juce::Colour(0xff707078));
     g.setFont(std::max(10.0f, bounds.getHeight() * 0.5f));
     g.drawText(button.getButtonText(), bounds, juce::Justification::centred);
 }
@@ -771,8 +690,7 @@ void PhaseCorrectorLookAndFeel::drawToggleButton(juce::Graphics& g, juce::Toggle
 PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorrectorAudioProcessor& p)
     : AudioProcessorEditor(&p),
       audioProcessor(p),
-      curveDisplay(p),
-      nyquistVisualizer(p)
+      curveDisplay(p)
 {
     setLookAndFeel(&lookAndFeel);
 
@@ -784,20 +702,19 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     // Title
     titleLabel.setText("PhaseCorrector", juce::dontSendNotification);
     titleLabel.setFont(juce::FontOptions(24.0f, juce::Font::bold));
-    titleLabel.setColour(juce::Label::textColourId, juce::Colour(0xff00ffaa));
+    titleLabel.setColour(juce::Label::textColourId, juce::Colour(0xffc0c0c0));  // Silver text
     titleLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(titleLabel);
 
     // Status label
-    statusLabel.setText("Low-THD Freeform Phase EQ | 64-bit Processing", juce::dontSendNotification);
+    statusLabel.setText("Low-THD Freeform Phase EQ | 64-bit | 64x Overlap", juce::dontSendNotification);
     statusLabel.setFont(juce::FontOptions(11.0f));
-    statusLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
+    statusLabel.setColour(juce::Label::textColourId, juce::Colour(0xff808080));
     statusLabel.setJustificationType(juce::Justification::centredRight);
     addAndMakeVisible(statusLabel);
 
-    // Displays
+    // Phase curve display
     addAndMakeVisible(curveDisplay);
-    addAndMakeVisible(nyquistVisualizer);
 
     // Clear button
     clearButton.setButtonText("Clear");
@@ -817,7 +734,6 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
         {
             auto presetName = presetBox.getText();
             audioProcessor.getPresetManager().loadPreset(presetName);
-            // Sync the curve display with loaded curve
             curveDisplay.loadFromProcessor();
         }
     };
@@ -827,10 +743,7 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     savePresetButton.setButtonText("Save");
     savePresetButton.onClick = [this]()
     {
-        // Always show input dialog for preset name
         auto* alertWindow = new juce::AlertWindow("Save Preset", "Enter preset name:", juce::MessageBoxIconType::NoIcon);
-
-        // Pre-fill with current preset name if one is selected
         auto currentName = presetBox.getText();
         if (currentName == "Select Preset..." || currentName.isEmpty())
             currentName = "";
@@ -895,30 +808,6 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     outputGainAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
         audioProcessor.getAPVTS(), "outputGain", outputGainSlider);
 
-    // Nyquist controls
-    setupLabel(nyquistLabel, "Nyquist Filter");
-    nyquistEnableButton.setButtonText("Enable");
-    addAndMakeVisible(nyquistEnableButton);
-    nyquistEnableAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(
-        audioProcessor.getAPVTS(), "nyquistEnabled", nyquistEnableButton);
-
-    setupLabel(nyquistFreqLabel, "Frequency");
-    setupSlider(nyquistFreqSlider, "Hz");
-    nyquistFreqSlider.setSkewFactorFromMidPoint(5000.0);
-    nyquistFreqAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.getAPVTS(), "nyquistFreq", nyquistFreqSlider);
-
-    setupLabel(nyquistQLabel, "Q");
-    setupSlider(nyquistQSlider, "");
-    nyquistQAttachment = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-        audioProcessor.getAPVTS(), "nyquistQ", nyquistQSlider);
-
-    setupLabel(nyquistSlopeLabel, "Slope");
-    nyquistSlopeBox.addItemList({ "12dB", "24dB", "36dB", "48dB", "60dB", "72dB", "84dB", "96dB" }, 1);
-    addAndMakeVisible(nyquistSlopeBox);
-    nyquistSlopeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        audioProcessor.getAPVTS(), "nyquistSlope", nyquistSlopeBox);
-
     setSize(BASE_WIDTH, BASE_HEIGHT);
 }
 
@@ -966,27 +855,59 @@ void PhaseCorrectorAudioProcessorEditor::refreshPresetList()
 
 void PhaseCorrectorAudioProcessorEditor::paint(juce::Graphics& g)
 {
-    juce::ColourGradient gradient(juce::Colour(0xff0f0f1a), 0.0f, 0.0f,
-                                   juce::Colour(0xff16162a), 0.0f, static_cast<float>(getHeight()),
-                                   false);
-    g.setGradientFill(gradient);
+    // Liquid metal background - subtle, premium feel
+    float w = static_cast<float>(getWidth());
+    float h = static_cast<float>(getHeight());
+
+    // Base gradient - deep charcoal to dark steel
+    juce::ColourGradient baseGradient(
+        juce::Colour(0xff0a0a0f), 0.0f, 0.0f,
+        juce::Colour(0xff141418), 0.0f, h, false);
+    g.setGradientFill(baseGradient);
     g.fillAll();
 
-    // Control panels background
-    float scale = static_cast<float>(getWidth()) / BASE_WIDTH;
-    int controlsY = static_cast<int>(410 * scale);
+    // Subtle liquid metal reflections - very understated
+    // Top highlight (simulates light hitting polished surface)
+    juce::ColourGradient topReflection(
+        juce::Colour(0x15ffffff), 0.0f, 0.0f,
+        juce::Colour(0x00ffffff), 0.0f, h * 0.3f, false);
+    g.setGradientFill(topReflection);
+    g.fillRect(0.0f, 0.0f, w, h * 0.3f);
 
-    g.setColour(juce::Colour(0xff12121f));
+    // Subtle diagonal highlight (brushed metal effect)
+    juce::ColourGradient diagonalSheen(
+        juce::Colour(0x00000000), 0.0f, h * 0.3f,
+        juce::Colour(0x08c0c0c0), w * 0.5f, h * 0.5f, false);
+    diagonalSheen.addColour(1.0, juce::Colour(0x00000000));
+    g.setGradientFill(diagonalSheen);
+    g.fillAll();
+
+    // Very subtle edge highlight along top
+    g.setColour(juce::Colour(0x20606060));
+    g.drawHorizontalLine(0, 0.0f, w);
+    g.setColour(juce::Colour(0x10404040));
+    g.drawHorizontalLine(1, 0.0f, w);
+
+    // Control panel area - slightly darker, recessed look
+    float scale = static_cast<float>(getWidth()) / BASE_WIDTH;
+    int controlsY = static_cast<int>(360 * scale);
+
+    // Recessed panel effect
+    juce::ColourGradient panelGradient(
+        juce::Colour(0xff080808), 0.0f, static_cast<float>(controlsY),
+        juce::Colour(0xff0c0c10), 0.0f, h, false);
+    g.setGradientFill(panelGradient);
     g.fillRect(0, controlsY, getWidth(), getHeight() - controlsY);
 
-    g.setColour(juce::Colour(0xff4a4a7e));
-    g.drawHorizontalLine(controlsY, 0.0f, static_cast<float>(getWidth()));
+    // Top edge of control panel - subtle bevel
+    g.setColour(juce::Colour(0x30000000));
+    g.drawHorizontalLine(controlsY, 0.0f, w);
+    g.setColour(juce::Colour(0x15303035));
+    g.drawHorizontalLine(controlsY + 1, 0.0f, w);
 
-    // Nyquist section separator
-    int nyquistX = static_cast<int>(480 * scale);
-    g.setColour(juce::Colour(0xff2a2a4e));
-    g.drawVerticalLine(nyquistX, static_cast<float>(controlsY + 10),
-                       static_cast<float>(getHeight() - 10));
+    // Bottom edge highlight
+    g.setColour(juce::Colour(0x08ffffff));
+    g.drawHorizontalLine(getHeight() - 1, 0.0f, w);
 }
 
 void PhaseCorrectorAudioProcessorEditor::resized()
@@ -996,45 +917,43 @@ void PhaseCorrectorAudioProcessorEditor::resized()
     // Header
     int headerH = static_cast<int>(45 * scale);
     titleLabel.setBounds(static_cast<int>(15 * scale), 0,
-                         static_cast<int>(200 * scale), headerH);
+                         static_cast<int>(180 * scale), headerH);
 
     // Clear and Invert buttons in header
-    clearButton.setBounds(static_cast<int>(220 * scale), static_cast<int>(10 * scale),
+    clearButton.setBounds(static_cast<int>(195 * scale), static_cast<int>(10 * scale),
                           static_cast<int>(50 * scale), static_cast<int>(25 * scale));
-    invertButton.setBounds(static_cast<int>(275 * scale), static_cast<int>(10 * scale),
+    invertButton.setBounds(static_cast<int>(250 * scale), static_cast<int>(10 * scale),
                            static_cast<int>(50 * scale), static_cast<int>(25 * scale));
 
     // Preset controls in header
-    presetBox.setBounds(static_cast<int>(340 * scale), static_cast<int>(10 * scale),
-                        static_cast<int>(140 * scale), static_cast<int>(25 * scale));
-    savePresetButton.setBounds(static_cast<int>(485 * scale), static_cast<int>(10 * scale),
+    presetBox.setBounds(static_cast<int>(315 * scale), static_cast<int>(10 * scale),
+                        static_cast<int>(130 * scale), static_cast<int>(25 * scale));
+    savePresetButton.setBounds(static_cast<int>(450 * scale), static_cast<int>(10 * scale),
                                static_cast<int>(40 * scale), static_cast<int>(25 * scale));
-    deletePresetButton.setBounds(static_cast<int>(530 * scale), static_cast<int>(10 * scale),
+    deletePresetButton.setBounds(static_cast<int>(495 * scale), static_cast<int>(10 * scale),
                                  static_cast<int>(35 * scale), static_cast<int>(25 * scale));
 
-    statusLabel.setBounds(getWidth() - static_cast<int>(280 * scale), 0,
-                          static_cast<int>(270 * scale), headerH);
+    statusLabel.setBounds(getWidth() - static_cast<int>(250 * scale), 0,
+                          static_cast<int>(240 * scale), headerH);
 
-    // Phase curve display (main area)
+    // Phase curve display (main area - larger now without nyquist visualizer)
     int curveY = headerH;
-    int curveH = static_cast<int>(280 * scale);
+    int curveH = static_cast<int>(305 * scale);
     curveDisplay.setBounds(static_cast<int>(10 * scale), curveY,
                            getWidth() - static_cast<int>(20 * scale), curveH);
 
-    // Nyquist visualizer (below phase curve)
-    int nyqVisY = curveY + curveH + static_cast<int>(5 * scale);
-    int nyqVisH = static_cast<int>(75 * scale);
-    nyquistVisualizer.setBounds(static_cast<int>(10 * scale), nyqVisY,
-                                getWidth() - static_cast<int>(20 * scale), nyqVisH);
-
-    // Controls area
-    int controlsY = nyqVisY + nyqVisH + static_cast<int>(10 * scale);
+    // Controls area (directly below curve)
+    int controlsY = curveY + curveH + static_cast<int>(10 * scale);
     int knobSize = static_cast<int>(70 * scale);
     int labelH = static_cast<int>(15 * scale);
-    int spacing = static_cast<int>(15 * scale);
+    int spacing = static_cast<int>(20 * scale);
 
-    // Main controls (left side) - FFT Quality and Overlap combo boxes
-    int x = static_cast<int>(15 * scale);
+    // Center the controls
+    int totalControlsWidth = static_cast<int>(100 * scale) * 2 + static_cast<int>(10 * scale) +
+                              knobSize * 3 + spacing * 2;
+    int startX = (getWidth() - totalControlsWidth) / 2;
+
+    int x = startX;
     int y = controlsY + static_cast<int>(5 * scale);
     int comboW = static_cast<int>(100 * scale);
     int comboH = static_cast<int>(22 * scale);
@@ -1050,8 +969,7 @@ void PhaseCorrectorAudioProcessorEditor::resized()
     fftOverlapLabel.setBounds(x, y, comboW, labelH);
     fftOverlapBox.setBounds(x, y + labelH + 2, comboW, comboH);
 
-    // Knobs start after the combo boxes
-    x += comboW + comboSpacing;
+    x += comboW + spacing;
 
     // Depth
     depthLabel.setBounds(x, y, knobSize, labelH);
@@ -1068,32 +986,4 @@ void PhaseCorrectorAudioProcessorEditor::resized()
     // Output
     outputGainLabel.setBounds(x, y, knobSize, labelH);
     outputGainSlider.setBounds(x, y + labelH, knobSize, knobSize);
-
-    // Nyquist controls (right side)
-    int nyquistX = static_cast<int>(500 * scale);
-    x = nyquistX;
-
-    // Nyquist label and enable
-    nyquistLabel.setBounds(x, y, static_cast<int>(100 * scale), labelH);
-    nyquistEnableButton.setBounds(x, y + labelH + 2, static_cast<int>(70 * scale),
-                                  static_cast<int>(22 * scale));
-
-    x += static_cast<int>(80 * scale);
-
-    // Frequency
-    nyquistFreqLabel.setBounds(x, y, knobSize, labelH);
-    nyquistFreqSlider.setBounds(x, y + labelH, knobSize, knobSize);
-
-    x += knobSize + spacing;
-
-    // Q
-    nyquistQLabel.setBounds(x, y, knobSize, labelH);
-    nyquistQSlider.setBounds(x, y + labelH, knobSize, knobSize);
-
-    x += knobSize + spacing;
-
-    // Slope
-    nyquistSlopeLabel.setBounds(x, y, static_cast<int>(70 * scale), labelH);
-    nyquistSlopeBox.setBounds(x, y + labelH + static_cast<int>(20 * scale),
-                              static_cast<int>(70 * scale), static_cast<int>(25 * scale));
 }

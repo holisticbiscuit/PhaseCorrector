@@ -163,102 +163,6 @@ double CubicSpline::evaluate(double x) const
 }
 
 //==============================================================================
-// Nyquist Filter Implementation
-//==============================================================================
-NyquistFilter::NyquistFilter()
-{
-    reset();
-}
-
-void NyquistFilter::prepare(double sampleRate)
-{
-    currentSampleRate = sampleRate;
-    reset();
-    updateCoefficients();
-}
-
-void NyquistFilter::reset()
-{
-    for (auto& channelStates : states)
-        for (auto& state : channelStates)
-            state = BiquadState{};
-}
-
-void NyquistFilter::setParameters(float frequency, float q, int stages)
-{
-    cutoffFreq = juce::jlimit(100.0f, static_cast<float>(currentSampleRate * 0.45), frequency);
-    resonance = juce::jlimit(0.1f, 10.0f, q);
-    numStages = juce::jlimit(1, MAX_STAGES, stages);
-    updateCoefficients();
-}
-
-void NyquistFilter::updateCoefficients()
-{
-    // Butterworth low-pass biquad coefficients
-    double w0 = 2.0 * juce::MathConstants<double>::pi * cutoffFreq / currentSampleRate;
-    double cosw0 = std::cos(w0);
-    double sinw0 = std::sin(w0);
-    double alpha = sinw0 / (2.0 * resonance);
-
-    double a0 = 1.0 + alpha;
-    b0 = ((1.0 - cosw0) / 2.0) / a0;
-    b1 = (1.0 - cosw0) / a0;
-    b2 = ((1.0 - cosw0) / 2.0) / a0;
-    a1 = (-2.0 * cosw0) / a0;
-    a2 = (1.0 - alpha) / a0;
-}
-
-float NyquistFilter::processSample(float sample, int channel)
-{
-    if (channel < 0 || channel >= 2)
-        return sample;
-
-    double x = static_cast<double>(sample);
-
-    for (int stage = 0; stage < numStages; ++stage)
-    {
-        auto& s = states[channel][stage];
-
-        double y = b0 * x + b1 * s.x1 + b2 * s.x2 - a1 * s.y1 - a2 * s.y2;
-
-        s.x2 = s.x1;
-        s.x1 = x;
-        s.y2 = s.y1;
-        s.y1 = y;
-
-        x = y;
-    }
-
-    return static_cast<float>(x);
-}
-
-float NyquistFilter::getMagnitudeAtFrequency(double freq) const
-{
-    if (freq <= 0.0 || freq >= currentSampleRate * 0.5)
-        return 0.0f;
-
-    double w = 2.0 * juce::MathConstants<double>::pi * freq / currentSampleRate;
-    double cosw = std::cos(w);
-    double cos2w = std::cos(2.0 * w);
-    double sinw = std::sin(w);
-    double sin2w = std::sin(2.0 * w);
-
-    // H(e^jw) numerator and denominator
-    double numReal = b0 + b1 * cosw + b2 * cos2w;
-    double numImag = -b1 * sinw - b2 * sin2w;
-    double denReal = 1.0 + a1 * cosw + a2 * cos2w;
-    double denImag = -a1 * sinw - a2 * sin2w;
-
-    double numMag = std::sqrt(numReal * numReal + numImag * numImag);
-    double denMag = std::sqrt(denReal * denReal + denImag * denImag);
-
-    double singleStageMag = (denMag > 1e-10) ? numMag / denMag : 0.0;
-
-    // Cascade stages
-    return static_cast<float>(std::pow(singleStageMag, numStages));
-}
-
-//==============================================================================
 // Double-Precision FFT Implementation (Cooley-Tukey Radix-2)
 //==============================================================================
 DoubleFFT::DoubleFFT(int order)
@@ -403,7 +307,7 @@ juce::StringArray PhaseProcessor::getQualityNames()
 
 juce::StringArray PhaseProcessor::getOverlapNames()
 {
-    return { "50% (2x)", "75% (4x)", "87.5% (8x)", "93.75% (16x)" };
+    return { "50% (2x)", "75% (4x)", "87.5% (8x)", "93.75% (16x)", "96.875% (32x)", "98.4% (64x)" };
 }
 
 void PhaseProcessor::setQuality(Quality q)
@@ -495,9 +399,17 @@ void PhaseProcessor::reconfigure()
             hopSize = analysisSize / 16;  // 93.75% overlap = 16x
             numOverlaps = 16;
             break;
+        case Overlap::Percent96875:
+            hopSize = analysisSize / 32;  // 96.875% overlap = 32x
+            numOverlaps = 32;
+            break;
+        case Overlap::Percent984375:
+            hopSize = analysisSize / 64;  // 98.4375% overlap = 64x
+            numOverlaps = 64;
+            break;
         default:
-            hopSize = analysisSize / 4;
-            numOverlaps = 4;
+            hopSize = analysisSize / 16;
+            numOverlaps = 16;
             break;
     }
 
@@ -1066,10 +978,6 @@ PhaseCorrectorAudioProcessor::PhaseCorrectorAudioProcessor()
     apvts.addParameterListener("depth", this);
     apvts.addParameterListener("fftQuality", this);
     apvts.addParameterListener("fftOverlap", this);
-    apvts.addParameterListener("nyquistFreq", this);
-    apvts.addParameterListener("nyquistQ", this);
-    apvts.addParameterListener("nyquistSlope", this);
-    apvts.addParameterListener("nyquistEnabled", this);
 }
 
 PhaseCorrectorAudioProcessor::~PhaseCorrectorAudioProcessor()
@@ -1079,10 +987,6 @@ PhaseCorrectorAudioProcessor::~PhaseCorrectorAudioProcessor()
     apvts.removeParameterListener("depth", this);
     apvts.removeParameterListener("fftQuality", this);
     apvts.removeParameterListener("fftOverlap", this);
-    apvts.removeParameterListener("nyquistFreq", this);
-    apvts.removeParameterListener("nyquistQ", this);
-    apvts.removeParameterListener("nyquistSlope", this);
-    apvts.removeParameterListener("nyquistEnabled", this);
 }
 
 juce::AudioProcessorValueTreeState::ParameterLayout PhaseCorrectorAudioProcessor::createParameterLayout()
@@ -1115,28 +1019,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PhaseCorrectorAudioProcessor
     // Overlap amount - affects latency vs quality trade-off
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("fftOverlap", 1), "Overlap",
-        PhaseProcessor::getOverlapNames(), 1));  // Default: 75% (High Quality)
-
-    // Nyquist Filter Enable
-    params.push_back(std::make_unique<juce::AudioParameterBool>(
-        juce::ParameterID("nyquistEnabled", 1), "Nyquist Filter", true));
-
-    // Nyquist Frequency (extended to 40kHz for high sample rates)
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("nyquistFreq", 1), "Nyquist Freq",
-        juce::NormalisableRange<float>(1000.0f, 40000.0f, 1.0f, 0.3f), 18000.0f,
-        juce::AudioParameterFloatAttributes().withLabel("Hz")));
-
-    // Nyquist Q
-    params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID("nyquistQ", 1), "Nyquist Q",
-        juce::NormalisableRange<float>(0.5f, 5.0f, 0.01f), 0.707f));
-
-    // Nyquist Slope (dB/octave)
-    params.push_back(std::make_unique<juce::AudioParameterChoice>(
-        juce::ParameterID("nyquistSlope", 1), "Nyquist Slope",
-        juce::StringArray{ "12 dB/oct", "24 dB/oct", "36 dB/oct", "48 dB/oct", "60 dB/oct", "72 dB/oct", "84 dB/oct", "96 dB/oct" },
-        1)); // Default 24 dB/oct
+        PhaseProcessor::getOverlapNames(), 5));  // Default: 98.4% (64x) for maximum quality
 
     return { params.begin(), params.end() };
 }
@@ -1161,13 +1044,6 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
     else if (parameterID == "fftOverlap")
     {
         phaseProcessor.setOverlap(static_cast<PhaseProcessor::Overlap>(static_cast<int>(newValue)));
-    }
-    else if (parameterID == "nyquistFreq" || parameterID == "nyquistQ" || parameterID == "nyquistSlope")
-    {
-        float freq = apvts.getRawParameterValue("nyquistFreq")->load();
-        float q = apvts.getRawParameterValue("nyquistQ")->load();
-        int slope = static_cast<int>(apvts.getRawParameterValue("nyquistSlope")->load()) + 1;
-        nyquistFilter.setParameters(freq, q, slope);
     }
 }
 
@@ -1195,13 +1071,6 @@ void PhaseCorrectorAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 
     // Prepare at native sample rate (no oversampling)
     phaseProcessor.prepare(sampleRate, samplesPerBlock);
-    nyquistFilter.prepare(sampleRate);
-
-    // Apply current parameter values
-    float freq = apvts.getRawParameterValue("nyquistFreq")->load();
-    float q = apvts.getRawParameterValue("nyquistQ")->load();
-    int slope = static_cast<int>(apvts.getRawParameterValue("nyquistSlope")->load()) + 1;
-    nyquistFilter.setParameters(freq, q, slope);
 
     phaseProcessor.setDepth(apvts.getRawParameterValue("depth")->load() / 100.0f);
 
@@ -1219,7 +1088,6 @@ void PhaseCorrectorAudioProcessor::prepareToPlay(double sampleRate, int samplesP
 void PhaseCorrectorAudioProcessor::releaseResources()
 {
     phaseProcessor.reset();
-    nyquistFilter.reset();
 }
 
 bool PhaseCorrectorAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
@@ -1242,26 +1110,11 @@ void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
         buffer.clear(i, 0, buffer.getNumSamples());
 
     const float dryWet = apvts.getRawParameterValue("dryWet")->load() / 100.0f;
-    const bool nyquistEnabled = apvts.getRawParameterValue("nyquistEnabled")->load() > 0.5f;
 
     // Store dry signal
     juce::AudioBuffer<float> dryBuffer;
     if (dryWet < 1.0f)
         dryBuffer.makeCopyOf(buffer);
-
-    const int numChannels = buffer.getNumChannels();
-    const int numSamples = buffer.getNumSamples();
-
-    // Apply Nyquist filter before phase processing
-    if (nyquistEnabled)
-    {
-        for (int ch = 0; ch < numChannels; ++ch)
-        {
-            auto* data = buffer.getWritePointer(ch);
-            for (int i = 0; i < numSamples; ++i)
-                data[i] = nyquistFilter.processSample(data[i], ch);
-        }
-    }
 
     // Process phase at native sample rate
     phaseProcessor.process(buffer);

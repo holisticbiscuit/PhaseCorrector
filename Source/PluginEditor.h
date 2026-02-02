@@ -1,43 +1,13 @@
 /*
   ==============================================================================
     PhaseCorrector - Plugin Editor Header
-    Resizable UI with Nyquist filter visualization
+    Premium UI with liquid metal aesthetic
   ==============================================================================
 */
 
 #pragma once
 
 #include "PluginProcessor.h"
-
-//==============================================================================
-// Nyquist Filter Visualizer
-//==============================================================================
-class NyquistVisualizer : public juce::Component,
-                          public juce::Timer
-{
-public:
-    NyquistVisualizer(PhaseCorrectorAudioProcessor& processor);
-    ~NyquistVisualizer() override;
-
-    void paint(juce::Graphics& g) override;
-    void resized() override;
-    void timerCallback() override;
-
-private:
-    void updateResponsePath();
-    float freqToX(float freq) const;
-    float dbToY(float db) const;
-
-    PhaseCorrectorAudioProcessor& audioProcessor;
-    juce::Path responsePath;
-
-    static constexpr float MIN_FREQ = 20.0f;
-    static constexpr float MAX_FREQ = 40000.0f;
-    static constexpr float MIN_DB = -48.0f;
-    static constexpr float MAX_DB = 6.0f;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NyquistVisualizer)
-};
 
 //==============================================================================
 // Phase Curve Display Component with Drawing Support
@@ -164,7 +134,6 @@ private:
 
     // Graph displays
     PhaseCurveDisplay curveDisplay;
-    NyquistVisualizer nyquistVisualizer;
 
     // Main controls
     juce::ComboBox fftQualityBox;
@@ -172,12 +141,6 @@ private:
     juce::Slider dryWetSlider;
     juce::Slider outputGainSlider;
     juce::Slider depthSlider;
-
-    // Nyquist controls
-    juce::ToggleButton nyquistEnableButton;
-    juce::Slider nyquistFreqSlider;
-    juce::Slider nyquistQSlider;
-    juce::ComboBox nyquistSlopeBox;
 
     // Buttons
     juce::TextButton clearButton;
@@ -196,10 +159,6 @@ private:
     juce::Label dryWetLabel;
     juce::Label outputGainLabel;
     juce::Label depthLabel;
-    juce::Label nyquistLabel;
-    juce::Label nyquistFreqLabel;
-    juce::Label nyquistQLabel;
-    juce::Label nyquistSlopeLabel;
     juce::Label statusLabel;
 
     // Parameter attachments
@@ -208,18 +167,17 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> dryWetAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outputGainAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> depthAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> nyquistEnableAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nyquistFreqAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> nyquistQAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> nyquistSlopeAttachment;
 
-    // Base dimensions for scaling
-    static constexpr int BASE_WIDTH = 850;
-    static constexpr int BASE_HEIGHT = 650;
-    static constexpr int MIN_WIDTH = 640;
-    static constexpr int MIN_HEIGHT = 490;
-    static constexpr int MAX_WIDTH = 1500;
-    static constexpr int MAX_HEIGHT = 1150;
+    // Liquid metal animation state
+    float animationTime = 0.0f;
+
+    // Base dimensions for scaling (reduced height without Nyquist section)
+    static constexpr int BASE_WIDTH = 750;
+    static constexpr int BASE_HEIGHT = 500;
+    static constexpr int MIN_WIDTH = 560;
+    static constexpr int MIN_HEIGHT = 375;
+    static constexpr int MAX_WIDTH = 1300;
+    static constexpr int MAX_HEIGHT = 870;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PhaseCorrectorAudioProcessorEditor)
 };

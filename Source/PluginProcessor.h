@@ -36,48 +36,6 @@ private:
 };
 
 //==============================================================================
-// Nyquist Filter - Cascaded Biquad Low-Pass
-//==============================================================================
-class NyquistFilter
-{
-public:
-    static constexpr int MAX_STAGES = 8; // Up to 96 dB/octave
-
-    NyquistFilter();
-
-    void prepare(double sampleRate);
-    void reset();
-    void setParameters(float frequency, float q, int stages);
-    float processSample(float sample, int channel);
-
-    // For visualization
-    float getMagnitudeAtFrequency(double freq) const;
-    float getFrequency() const { return cutoffFreq; }
-    float getQ() const { return resonance; }
-    int getStages() const { return numStages; }
-
-private:
-    void updateCoefficients();
-
-    struct BiquadState
-    {
-        double x1 = 0, x2 = 0;
-        double y1 = 0, y2 = 0;
-    };
-
-    std::array<std::array<BiquadState, MAX_STAGES>, 2> states; // Per channel, per stage
-
-    // Coefficients (same for all stages)
-    double b0 = 1, b1 = 0, b2 = 0;
-    double a1 = 0, a2 = 0;
-
-    double currentSampleRate = 44100.0;
-    float cutoffFreq = 20000.0f;
-    float resonance = 0.707f;
-    int numStages = 2;
-};
-
-//==============================================================================
 // Fast Math Approximations for Real-time Audio
 //==============================================================================
 namespace FastMath
@@ -205,10 +163,12 @@ public:
     // Overlap amount - affects latency and quality
     enum class Overlap
     {
-        Percent50 = 0,    // hopSize = fftSize/2, 2 overlaps
-        Percent75 = 1,    // hopSize = fftSize/4, 4 overlaps
-        Percent875 = 2,   // hopSize = fftSize/8, 8 overlaps
-        Percent9375 = 3   // hopSize = fftSize/16, 16 overlaps
+        Percent50 = 0,      // hopSize = fftSize/2, 2 overlaps
+        Percent75 = 1,      // hopSize = fftSize/4, 4 overlaps
+        Percent875 = 2,     // hopSize = fftSize/8, 8 overlaps
+        Percent9375 = 3,    // hopSize = fftSize/16, 16 overlaps
+        Percent96875 = 4,   // hopSize = fftSize/32, 32 overlaps
+        Percent984375 = 5   // hopSize = fftSize/64, 64 overlaps
     };
 
     PhaseProcessor();
@@ -428,7 +388,6 @@ public:
     bool hasCurveLoaded() const { return curveLoaded.load(); }
 
     // Access for visualization
-    const NyquistFilter& getNyquistFilter() const { return nyquistFilter; }
     const PhaseProcessor& getPhaseProcessor() const { return phaseProcessor; }
     PresetManager& getPresetManager() { return presetManager; }
 
@@ -439,7 +398,6 @@ private:
 
     // DSP Components
     PhaseProcessor phaseProcessor;
-    NyquistFilter nyquistFilter;
     juce::dsp::Gain<float> outputGain;
 
     // Preset Manager
