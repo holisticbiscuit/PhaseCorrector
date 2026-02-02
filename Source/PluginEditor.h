@@ -73,6 +73,9 @@ public:
     // Invert the curve (flip phase signs)
     void invertCurve();
 
+    // Load curve from processor (for preset loading)
+    void loadFromProcessor();
+
 private:
     void drawGrid(juce::Graphics& g);
     void drawCurve(juce::Graphics& g);
@@ -164,8 +167,6 @@ private:
     NyquistVisualizer nyquistVisualizer;
 
     // Main controls
-    juce::ComboBox oversampleBox;
-    juce::ComboBox ovsModeBox;
     juce::ComboBox fftQualityBox;
     juce::ComboBox fftOverlapBox;
     juce::Slider dryWetSlider;
@@ -190,8 +191,6 @@ private:
 
     // Labels
     juce::Label titleLabel;
-    juce::Label oversampleLabel;
-    juce::Label ovsModeLabel;
     juce::Label fftQualityLabel;
     juce::Label fftOverlapLabel;
     juce::Label dryWetLabel;
@@ -204,8 +203,6 @@ private:
     juce::Label statusLabel;
 
     // Parameter attachments
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> oversampleAttachment;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> ovsModeAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftQualityAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftOverlapAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> dryWetAttachment;

@@ -155,27 +155,60 @@ namespace FastMath
 }
 
 //==============================================================================
+// Double-Precision FFT (Cooley-Tukey Radix-2)
+// Custom implementation for 64-bit processing since JUCE FFT only supports float
+//==============================================================================
+class DoubleFFT
+{
+public:
+    DoubleFFT() = default;
+    explicit DoubleFFT(int order);
+
+    void initialize(int order);
+    void performRealForward(double* data);   // In-place, real input
+    void performRealInverse(double* data);   // In-place, real output
+
+    int getSize() const { return fftSize; }
+
+private:
+    void computeTwiddles();
+    void fftCore(std::complex<double>* data, bool inverse);
+    void bitReverse(std::complex<double>* data);
+
+    int fftOrder = 0;
+    int fftSize = 0;
+    std::vector<std::complex<double>> twiddles;
+    std::vector<std::complex<double>> workBuffer;
+    std::vector<int> bitRevTable;
+};
+
+//==============================================================================
 // FFT-based Phase Processor with Overlap-Add
 //==============================================================================
 class PhaseProcessor
 {
 public:
     // Quality levels - determines FFT size and frequency resolution
-    // Analysis size determines latency, FFT size = 2x analysis (zero-padding)
+    // Analysis size determines latency and FFT size
     enum class Quality
     {
-        Low = 0,      // 1024 analysis, 2048 FFT, ~43 Hz resolution @ 44.1k
-        Medium = 1,   // 2048 analysis, 4096 FFT, ~21 Hz resolution
-        High = 2,     // 4096 analysis, 8192 FFT, ~10.7 Hz resolution (default)
-        VeryHigh = 3, // 8192 analysis, 16384 FFT, ~5.4 Hz resolution
-        Extreme = 4   // 16384 analysis, 32768 FFT, ~2.7 Hz resolution
+        Low = 0,       // 1024 FFT, ~43 Hz resolution @ 44.1k
+        Medium = 1,    // 2048 FFT, ~21 Hz resolution
+        High = 2,      // 4096 FFT, ~10.7 Hz resolution (default)
+        VeryHigh = 3,  // 8192 FFT, ~5.4 Hz resolution
+        Extreme = 4,   // 32768 FFT, ~1.35 Hz resolution
+        Ultra64k = 5,  // 65536 FFT, ~0.67 Hz resolution
+        Ultra128k = 6, // 131072 FFT, ~0.34 Hz resolution
+        Ultra256k = 7  // 262144 FFT, ~0.17 Hz resolution
     };
 
     // Overlap amount - affects latency and quality
     enum class Overlap
     {
-        Percent50 = 0,  // 2x overlap, lower latency, uses Sine window
-        Percent75 = 1   // 4x overlap, better quality, uses Hann window (default)
+        Percent50 = 0,    // hopSize = fftSize/2, 2 overlaps
+        Percent75 = 1,    // hopSize = fftSize/4, 4 overlaps
+        Percent875 = 2,   // hopSize = fftSize/8, 8 overlaps
+        Percent9375 = 3   // hopSize = fftSize/16, 16 overlaps
     };
 
     PhaseProcessor();
@@ -198,21 +231,24 @@ public:
     // Get current latency in samples (at oversampled rate)
     int getLatencySamples() const { return analysisSize; }
 
-    // Calculate expected latency for given quality (at oversampled rate)
+    // Calculate expected latency for given quality
     static int getLatencyForQuality(Quality q)
     {
         switch (q)
         {
-            case Quality::Low:      return 1024;
-            case Quality::Medium:   return 2048;
-            case Quality::High:     return 4096;
-            case Quality::VeryHigh: return 8192;
-            case Quality::Extreme:  return 32768;
-            default:                return 4096;
+            case Quality::Low:       return 1024;
+            case Quality::Medium:    return 2048;
+            case Quality::High:      return 4096;
+            case Quality::VeryHigh:  return 8192;
+            case Quality::Extreme:   return 32768;
+            case Quality::Ultra64k:  return 65536;
+            case Quality::Ultra128k: return 131072;
+            case Quality::Ultra256k: return 262144;
+            default:                 return 4096;
         }
     }
 
-    const std::vector<float>& getPhaseTable() const { return phaseTable; }
+    const std::vector<double>& getPhaseTable() const { return phaseTable; }
     double getSampleRate() const { return currentSampleRate; }
     int getFFTSize() const { return fftSize; }
     int getAnalysisSize() const { return analysisSize; }
@@ -228,31 +264,31 @@ private:
     void reconfigure();  // Rebuilds FFT, windows, buffers
     void buildWindows();
 
-    std::unique_ptr<juce::dsp::FFT> fft;
+    DoubleFFT fft;  // 64-bit double precision FFT
 
     struct ChannelState
     {
-        std::vector<float> inputBuffer;
-        std::vector<float> outputBuffer;
-        std::vector<float> fftBuffer;  // Pre-allocated FFT workspace
+        std::vector<double> inputBuffer;
+        std::vector<double> outputBuffer;
+        std::vector<double> fftBuffer;  // Pre-allocated FFT workspace
         int inputWritePos = 0;
         int outputReadPos = 0;
         int samplesUntilNextFrame = 0;
 
-        void resize(int bufferSize, int fftSize, int hopSize)
+        void resize(int bufferSize, int newFftSize, int newHopSize)
         {
-            inputBuffer.resize(bufferSize, 0.0f);
-            outputBuffer.resize(bufferSize, 0.0f);
-            fftBuffer.resize(fftSize * 2, 0.0f);  // Real + imaginary
+            inputBuffer.resize(bufferSize, 0.0);
+            outputBuffer.resize(bufferSize, 0.0);
+            fftBuffer.resize(newFftSize * 2, 0.0);  // Real + imaginary
             inputWritePos = 0;
             outputReadPos = 0;
-            samplesUntilNextFrame = hopSize;
+            samplesUntilNextFrame = newHopSize;
         }
 
         void clear()
         {
-            std::fill(inputBuffer.begin(), inputBuffer.end(), 0.0f);
-            std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0f);
+            std::fill(inputBuffer.begin(), inputBuffer.end(), 0.0);
+            std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
             inputWritePos = 0;
             outputReadPos = 0;
         }
@@ -260,10 +296,10 @@ private:
 
     std::array<ChannelState, 2> channels;
 
-    // Dynamic windows
-    std::vector<float> analysisWindow;
-    std::vector<float> synthesisWindow;
-    float windowCompensation = 1.0f;
+    // Dynamic windows (double precision)
+    std::vector<double> analysisWindow;
+    std::vector<double> synthesisWindow;
+    double windowCompensation = 1.0;
 
     // Current FFT parameters
     int fftOrder = 13;        // 2^13 = 8192
@@ -278,10 +314,10 @@ private:
     std::atomic<bool> needsReconfigure{false};
     juce::SpinLock processingLock;
 
-    // Phase modification table
-    std::vector<float> phaseTable;
-    std::vector<float> filterIR;        // All-pass filter impulse response
-    std::vector<float> filterSpectrum;  // FFT of filter IR (for fast convolution)
+    // Phase modification table (double precision)
+    std::vector<double> phaseTable;
+    std::vector<double> filterIR;        // All-pass filter impulse response
+    std::vector<double> filterSpectrum;  // FFT of filter IR (for fast convolution)
     std::atomic<bool> filterIRReady{false};
     CubicSpline phaseCurve;
     std::mutex curveMutex;
@@ -289,10 +325,10 @@ private:
     double currentSampleRate = 44100.0;
     std::atomic<float> phaseDepth{1.0f};
 
-    static constexpr float MIN_FREQ = 20.0f;
-    static constexpr float MAX_FREQ = 20000.0f;
-    static constexpr float LOG_MIN_FREQ = 1.301030f;
-    static constexpr float LOG_MAX_FREQ = 4.301030f;
+    static constexpr double MIN_FREQ = 20.0;
+    static constexpr double MAX_FREQ = 20000.0;
+    static constexpr double LOG_MIN_FREQ = 1.301030;
+    static constexpr double LOG_MAX_FREQ = 4.301030;
 };
 
 //==============================================================================
@@ -315,68 +351,6 @@ public:
 private:
     static constexpr float LOG_MIN_FREQ = 1.301030f;
     static constexpr float LOG_MAX_FREQ = 4.301030f;
-};
-
-//==============================================================================
-// Oversampling Manager
-//==============================================================================
-class OversamplingManager
-{
-public:
-    enum class Rate
-    {
-        x1 = 0,
-        x2 = 1,
-        x4 = 2,
-        x8 = 3,
-        x16 = 4,
-        x32 = 5,
-        x64 = 6
-    };
-
-    enum class FilterMode
-    {
-        FIR = 0,  // Linear phase
-        IIR = 1   // Minimum phase (lower CPU)
-    };
-
-    OversamplingManager();
-    ~OversamplingManager() = default;
-
-    void prepare(double sampleRate, int blockSize);
-    void reset();
-
-    // Call this at the start of processBlock to apply any pending changes
-    // Returns true if rate/mode changed (dependents need update)
-    bool applyPendingChanges();
-
-    juce::dsp::AudioBlock<float> processSamplesUp(juce::dsp::AudioBlock<float>& inputBlock);
-    void processSamplesDown(juce::dsp::AudioBlock<float>& outputBlock);
-
-    void setRate(Rate newRate);
-    void setFilterMode(FilterMode mode);
-    Rate getRate() const { return currentRate; }
-    FilterMode getFilterMode() const { return filterMode; }
-    int getFactor() const { return 1 << static_cast<int>(currentRate); }
-    float getLatencySamples() const;
-
-    static juce::StringArray getRateNames();
-    static juce::StringArray getFilterModeNames();
-
-private:
-    void createOversampler();
-
-    std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
-    Rate currentRate = Rate::x1;
-    FilterMode filterMode = FilterMode::FIR;
-
-    // Pending changes (set from GUI thread, applied on audio thread)
-    std::atomic<int> pendingRate{-1};      // -1 = no change pending
-    std::atomic<int> pendingFilterMode{-1}; // -1 = no change pending
-
-    double baseSampleRate = 44100.0;
-    int baseBlockSize = 512;
-    bool isPrepared = false;
 };
 
 //==============================================================================
@@ -465,7 +439,6 @@ private:
 
     // DSP Components
     PhaseProcessor phaseProcessor;
-    OversamplingManager oversamplingManager;
     NyquistFilter nyquistFilter;
     juce::dsp::Gain<float> outputGain;
 

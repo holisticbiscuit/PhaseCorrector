@@ -284,6 +284,17 @@ void PhaseCurveDisplay::clearCurve()
     repaint();
 }
 
+void PhaseCurveDisplay::loadFromProcessor()
+{
+    // Sync editablePoints from the processor's curve
+    const auto& processorPoints = audioProcessor.getCurrentCurvePoints();
+    editablePoints.clear();
+    editablePoints.reserve(processorPoints.size());
+    for (const auto& pt : processorPoints)
+        editablePoints.push_back(pt);
+    repaint();
+}
+
 void PhaseCurveDisplay::invertCurve()
 {
     // Flip all phase values
@@ -807,9 +818,7 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
             auto presetName = presetBox.getText();
             audioProcessor.getPresetManager().loadPreset(presetName);
             // Sync the curve display with loaded curve
-            auto& points = audioProcessor.getCurrentCurvePoints();
-            if (!points.empty())
-                curveDisplay.clearCurve();  // Will sync from processor
+            curveDisplay.loadFromProcessor();
         }
     };
     addAndMakeVisible(presetBox);
@@ -818,27 +827,31 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     savePresetButton.setButtonText("Save");
     savePresetButton.onClick = [this]()
     {
-        auto name = presetBox.getText();
-        if (name.isEmpty() || name == "Select Preset...")
-        {
-            // Ask for name
-            juce::AlertWindow::showAsync(
-                juce::MessageBoxOptions()
-                    .withTitle("Save Preset")
-                    .withMessage("Enter preset name:")
-                    .withButton("Save")
-                    .withButton("Cancel"),
-                [this](int result)
+        // Always show input dialog for preset name
+        auto* alertWindow = new juce::AlertWindow("Save Preset", "Enter preset name:", juce::MessageBoxIconType::NoIcon);
+
+        // Pre-fill with current preset name if one is selected
+        auto currentName = presetBox.getText();
+        if (currentName == "Select Preset..." || currentName.isEmpty())
+            currentName = "";
+        alertWindow->addTextEditor("presetName", currentName, "Name:");
+        alertWindow->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
+        alertWindow->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+
+        alertWindow->enterModalState(true, juce::ModalCallbackFunction::create(
+            [this, alertWindow](int result)
+            {
+                if (result == 1)
                 {
-                    if (result == 1)
+                    auto presetName = alertWindow->getTextEditorContents("presetName");
+                    if (presetName.isNotEmpty())
                     {
-                        // This is a simplified version - in production you'd use a proper input dialog
+                        audioProcessor.getPresetManager().savePreset(presetName);
+                        refreshPresetList();
                     }
-                });
-            return;
-        }
-        audioProcessor.getPresetManager().savePreset(name);
-        refreshPresetList();
+                }
+                delete alertWindow;
+            }), true);
     };
     addAndMakeVisible(savePresetButton);
 
@@ -855,18 +868,6 @@ PhaseCorrectorAudioProcessorEditor::PhaseCorrectorAudioProcessorEditor(PhaseCorr
     addAndMakeVisible(deletePresetButton);
 
     // Main controls
-    setupLabel(oversampleLabel, "Oversampling");
-    oversampleBox.addItemList(OversamplingManager::getRateNames(), 1);
-    addAndMakeVisible(oversampleBox);
-    oversampleAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        audioProcessor.getAPVTS(), "oversample", oversampleBox);
-
-    setupLabel(ovsModeLabel, "OVS Filter");
-    ovsModeBox.addItemList(OversamplingManager::getFilterModeNames(), 1);
-    addAndMakeVisible(ovsModeBox);
-    ovsModeAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
-        audioProcessor.getAPVTS(), "ovsMode", ovsModeBox);
-
     setupLabel(fftQualityLabel, "FFT Quality");
     fftQualityBox.addItemList(PhaseProcessor::getQualityNames(), 1);
     addAndMakeVisible(fftQualityBox);
@@ -1032,36 +1033,25 @@ void PhaseCorrectorAudioProcessorEditor::resized()
     int labelH = static_cast<int>(15 * scale);
     int spacing = static_cast<int>(15 * scale);
 
-    // Main controls (left side) - two rows of combo boxes
+    // Main controls (left side) - FFT Quality and Overlap combo boxes
     int x = static_cast<int>(15 * scale);
     int y = controlsY + static_cast<int>(5 * scale);
-    int comboW = static_cast<int>(85 * scale);
+    int comboW = static_cast<int>(100 * scale);
     int comboH = static_cast<int>(22 * scale);
-    int comboSpacing = static_cast<int>(5 * scale);
+    int comboSpacing = static_cast<int>(10 * scale);
 
-    // Row 1: Oversampling and OVS Mode
-    oversampleLabel.setBounds(x, y, comboW, labelH);
-    oversampleBox.setBounds(x, y + labelH + 2, comboW, comboH);
-
-    x += comboW + comboSpacing;
-
-    ovsModeLabel.setBounds(x, y, comboW, labelH);
-    ovsModeBox.setBounds(x, y + labelH + 2, comboW, comboH);
-
-    // Row 2: FFT Quality and Overlap (below row 1)
-    x = static_cast<int>(15 * scale);
-    int row2Y = y + labelH + comboH + static_cast<int>(8 * scale);
-
-    fftQualityLabel.setBounds(x, row2Y, comboW, labelH);
-    fftQualityBox.setBounds(x, row2Y + labelH + 2, comboW, comboH);
+    // FFT Quality
+    fftQualityLabel.setBounds(x, y, comboW, labelH);
+    fftQualityBox.setBounds(x, y + labelH + 2, comboW, comboH);
 
     x += comboW + comboSpacing;
 
-    fftOverlapLabel.setBounds(x, row2Y, comboW, labelH);
-    fftOverlapBox.setBounds(x, row2Y + labelH + 2, comboW, comboH);
+    // Overlap
+    fftOverlapLabel.setBounds(x, y, comboW, labelH);
+    fftOverlapBox.setBounds(x, y + labelH + 2, comboW, comboH);
 
     // Knobs start after the combo boxes
-    x = static_cast<int>(195 * scale);
+    x += comboW + comboSpacing;
 
     // Depth
     depthLabel.setBounds(x, y, knobSize, labelH);
