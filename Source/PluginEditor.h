@@ -1,7 +1,7 @@
 /*
   ==============================================================================
     PhaseCorrector - Plugin Editor Header
-    ULTRA LUXURY CHAMPION EDITION
+    Clean minimal edition
   ==============================================================================
 */
 
@@ -13,12 +13,11 @@
 // Phase Curve Display Component with Drawing Support
 //==============================================================================
 class PhaseCurveDisplay : public juce::Component,
-                          public juce::FileDragAndDropTarget,
-                          public juce::Timer
+                          public juce::FileDragAndDropTarget
 {
 public:
     PhaseCurveDisplay(PhaseCorrectorAudioProcessor& processor);
-    ~PhaseCurveDisplay() override;
+    ~PhaseCurveDisplay() override = default;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -35,8 +34,6 @@ public:
     void fileDragEnter(const juce::StringArray& files, int x, int y) override;
     void fileDragExit(const juce::StringArray& files) override;
 
-    void timerCallback() override;
-
     // Clear the curve
     void clearCurve();
 
@@ -49,7 +46,6 @@ public:
 private:
     void drawGrid(juce::Graphics& g);
     void drawCurve(juce::Graphics& g);
-    void drawPoints(juce::Graphics& g);
     void drawFrequencyLabels(juce::Graphics& g);
     void drawPhaseLabels(juce::Graphics& g);
 
@@ -74,13 +70,11 @@ private:
     std::vector<std::pair<double, double>> editablePoints;
 
     bool isDraggingOver = false;
-    juce::Path curvePath;
-    float animationPhase = 0.0f;
 
     static constexpr float LOG_MIN_FREQ = 1.301030f;
     static constexpr float LOG_MAX_FREQ = 4.301030f;
-    static constexpr int MAX_POINTS = 2000;  // High precision like MFreeformPhase
-    static constexpr float POINT_SPACING = 0.002f;  // Minimum log freq spacing between points
+    static constexpr int MAX_POINTS = 2000;
+    static constexpr float POINT_SPACING = 0.002f;
 
     int marginLeft = 50;
     int marginRight = 15;
@@ -91,7 +85,7 @@ private:
 };
 
 //==============================================================================
-// Custom Look and Feel
+// Simple Look and Feel
 //==============================================================================
 class PhaseCorrectorLookAndFeel : public juce::LookAndFeel_V4
 {
@@ -106,19 +100,12 @@ public:
                       int buttonX, int buttonY, int buttonW, int buttonH,
                       juce::ComboBox& box) override;
 
-    void drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
-                          bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
-
     void drawButtonBackground(juce::Graphics& g, juce::Button& button,
                               const juce::Colour& backgroundColour,
                               bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
 
     void drawButtonText(juce::Graphics& g, juce::TextButton& button,
                         bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
-
-private:
-    juce::Colour accentColour;
-    juce::Colour backgroundColour;
 };
 
 //==============================================================================
@@ -167,7 +154,6 @@ private:
     juce::Label dryWetLabel;
     juce::Label outputGainLabel;
     juce::Label depthLabel;
-    juce::Label statusLabel;
 
     // Parameter attachments
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> fftQualityAttachment;
@@ -176,16 +162,13 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outputGainAttachment;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> depthAttachment;
 
-    // Liquid metal animation state
-    float animationTime = 0.0f;
-
-    // Base dimensions for scaling (reduced height without Nyquist section)
-    static constexpr int BASE_WIDTH = 750;
-    static constexpr int BASE_HEIGHT = 500;
-    static constexpr int MIN_WIDTH = 560;
-    static constexpr int MIN_HEIGHT = 375;
-    static constexpr int MAX_WIDTH = 1300;
-    static constexpr int MAX_HEIGHT = 870;
+    // Base dimensions for scaling
+    static constexpr int BASE_WIDTH = 700;
+    static constexpr int BASE_HEIGHT = 450;
+    static constexpr int MIN_WIDTH = 525;
+    static constexpr int MIN_HEIGHT = 337;
+    static constexpr int MAX_WIDTH = 1200;
+    static constexpr int MAX_HEIGHT = 770;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PhaseCorrectorAudioProcessorEditor)
 };
