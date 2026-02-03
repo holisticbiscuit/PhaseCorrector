@@ -16,6 +16,32 @@
 #endif
 
 //==============================================================================
+// Compensated Arithmetic for High-Precision Complex Multiplication
+// Uses FMA (fused multiply-add) to eliminate catastrophic cancellation in ac-bd
+//==============================================================================
+namespace CompensatedArithmetic
+{
+    // Compute a*b - c*d with high accuracy using FMA
+    // This eliminates catastrophic cancellation when a*b ≈ c*d
+    inline double accurateDifferenceOfProducts(double a, double b, double c, double d)
+    {
+        double cd = c * d;
+        double err = std::fma(c, d, -cd);  // Exact error: c*d - cd
+        double result = std::fma(a, b, -cd);  // a*b - cd
+        return result - err;  // (a*b - cd) - (c*d - cd) = a*b - c*d
+    }
+
+    // Compute a*b + c*d with high accuracy using FMA
+    inline double accurateSumOfProducts(double a, double b, double c, double d)
+    {
+        double cd = c * d;
+        double err = std::fma(c, d, -cd);  // Exact error: c*d - cd
+        double result = std::fma(a, b, cd);  // a*b + cd
+        return result + err;  // (a*b + cd) + (c*d - cd) = a*b + c*d
+    }
+}
+
+//==============================================================================
 // Cubic Spline Implementation (with crash protection)
 //==============================================================================
 void CubicSpline::clear()
@@ -343,12 +369,19 @@ void PhaseProcessor::buildWindows()
         synthesisWindow[i] = windowValue;
     }
 
-    // Compute COLA compensation from window energy
+    // Compute COLA compensation from window energy using Kahan summation
     // For overlap-add, compensation = hopSize / sum(window[i]²)
     // This formula gives consistent results for any FFT size
     double windowSquaredSum = 0.0;
+    double windowSumError = 0.0;  // Kahan error compensation
     for (int i = 0; i < analysisSize; ++i)
-        windowSquaredSum += analysisWindow[i] * synthesisWindow[i];
+    {
+        const double value = analysisWindow[i] * synthesisWindow[i];
+        const double y = value - windowSumError;
+        const double t = windowSquaredSum + y;
+        windowSumError = (t - windowSquaredSum) - y;
+        windowSquaredSum = t;
+    }
 
     if (windowSquaredSum > 0.001)
         windowCompensation = static_cast<double>(hopSize) / windowSquaredSum;
@@ -507,7 +540,7 @@ void PhaseProcessor::updatePhaseCurve(const std::vector<std::pair<double, double
 void PhaseProcessor::rebuildPhaseTable()
 {
     const int numBins = fftSize / 2 + 1;
-    const double depth = static_cast<double>(phaseDepth.load());
+    const double depth = phaseDepth.load();
 
     // Ensure phase table is correct size
     if (static_cast<int>(phaseTable.size()) != numBins)
@@ -559,7 +592,7 @@ void PhaseProcessor::rebuildImpulseResponse()
     // Store as complex spectrum for fast convolution (double precision)
 
     const int numBins = fftSize / 2 + 1;
-    const double depth = static_cast<double>(phaseDepth.load());
+    const double depth = phaseDepth.load();
 
     // Resize filter spectrum buffer (interleaved real/imag for complex multiply)
     if (static_cast<int>(filterSpectrum.size()) != fftSize * 2)
@@ -629,7 +662,7 @@ void PhaseProcessor::processFrame(int channel)
     // Apply all-pass filter via complex multiplication in frequency domain
     // This is proper convolution: Y(k) = X(k) * H(k)
     // Complex multiply: (a+jb)(c+jd) = (ac-bd) + j(ad+bc)
-    const double depth = std::abs(static_cast<double>(phaseDepth.load()));
+    const double depth = std::abs(phaseDepth.load());
     const bool hasPhaseData = phaseCurve.isValid() && depth > 0.001 && filterIRReady.load();
 
     if (hasPhaseData)
@@ -658,23 +691,37 @@ void PhaseProcessor::processFrame(int channel)
     // Inverse FFT (double precision)
     fft.performRealInverse(fftData);
 
-    // Overlap-add with synthesis window
+    // Overlap-add with synthesis window using Kahan compensated summation
     const int writePos = ch.outputReadPos;
     double* __restrict outBuf = ch.outputBuffer.data();
+    double* __restrict outBufErr = ch.outputBufferError.data();
     const double* __restrict synWin = synthesisWindow.data();
     const double compensation = windowCompensation;
 
     if (writePos + analysisSize <= bufferSize)
     {
         for (int i = 0; i < analysisSize; ++i)
-            outBuf[writePos + i] += fftData[i] * synWin[i] * compensation;
+        {
+            const int idx = writePos + i;
+            const double value = fftData[i] * synWin[i] * compensation;
+            // Kahan compensated summation for near-infinite precision accumulation
+            const double y = value - outBufErr[idx];
+            const double t = outBuf[idx] + y;
+            outBufErr[idx] = (t - outBuf[idx]) - y;
+            outBuf[idx] = t;
+        }
     }
     else
     {
         for (int i = 0; i < analysisSize; ++i)
         {
-            int idx = (writePos + i) % bufferSize;
-            outBuf[idx] += fftData[i] * synWin[i] * compensation;
+            const int idx = (writePos + i) % bufferSize;
+            const double value = fftData[i] * synWin[i] * compensation;
+            // Kahan compensated summation for near-infinite precision accumulation
+            const double y = value - outBufErr[idx];
+            const double t = outBuf[idx] + y;
+            outBufErr[idx] = (t - outBuf[idx]) - y;
+            outBuf[idx] = t;
         }
     }
 }
@@ -696,7 +743,7 @@ void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
 
     // Fast bypass: if no phase curve and depth is effectively zero, just pass through
     // with latency compensation (still need to maintain buffer state)
-    const double depth = std::abs(static_cast<double>(phaseDepth.load()));
+    const double depth = std::abs(phaseDepth.load());
     const bool shouldProcess = phaseCurve.isValid() && depth > 0.001;
 
     for (int sample = 0; sample < numSamples; ++sample)
@@ -712,6 +759,7 @@ void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
             // Read output and convert double back to float
             double outputSample = state.outputBuffer[state.outputReadPos];
             state.outputBuffer[state.outputReadPos] = 0.0;
+            state.outputBufferError[state.outputReadPos] = 0.0;  // Clear Kahan error
 
             buffer.setSample(ch, sample, static_cast<float>(outputSample));
 
@@ -750,16 +798,89 @@ void PhaseProcessor::processFrameBypass(int channel)
     const int writePos = ch.outputReadPos;
     const double* __restrict inBuf = ch.inputBuffer.data();
     double* __restrict outBuf = ch.outputBuffer.data();
+    double* __restrict outBufErr = ch.outputBufferError.data();
     const double* __restrict anaWin = analysisWindow.data();
     const double* __restrict synWin = synthesisWindow.data();
     const double compensation = windowCompensation;
 
-    // Direct overlap-add without FFT
+    // Direct overlap-add without FFT using Kahan compensated summation
     for (int i = 0; i < analysisSize; ++i)
     {
-        int rIdx = (readPos + i) % bufferSize;
-        int wIdx = (writePos + i) % bufferSize;
-        outBuf[wIdx] += inBuf[rIdx] * anaWin[i] * synWin[i] * compensation;
+        const int rIdx = (readPos + i) % bufferSize;
+        const int wIdx = (writePos + i) % bufferSize;
+        const double value = inBuf[rIdx] * anaWin[i] * synWin[i] * compensation;
+        // Kahan compensated summation for near-infinite precision accumulation
+        const double y = value - outBufErr[wIdx];
+        const double t = outBuf[wIdx] + y;
+        outBufErr[wIdx] = (t - outBuf[wIdx]) - y;
+        outBuf[wIdx] = t;
+    }
+}
+
+//==============================================================================
+// 64-bit Native Double Precision Processing (no float conversion)
+//==============================================================================
+void PhaseProcessor::process(juce::AudioBuffer<double>& buffer)
+{
+    // Check if reconfiguration is needed (quality/overlap changed)
+    if (needsReconfigure.load())
+    {
+        reconfigure();
+    }
+
+    juce::SpinLock::ScopedTryLockType lock(processingLock);
+    if (!lock.isLocked())
+        return;  // Skip processing if reconfiguring
+
+    const int numChannels = std::min(buffer.getNumChannels(), 2);
+    const int numSamples = buffer.getNumSamples();
+
+    // Fast bypass: if no phase curve and depth is effectively zero, just pass through
+    // with latency compensation (still need to maintain buffer state)
+    const double depth = std::abs(phaseDepth.load());
+    const bool shouldProcess = phaseCurve.isValid() && depth > 0.001;
+
+    // Get raw pointers for direct access (more reliable than getSample/setSample)
+    double* channelPtrs[2] = { nullptr, nullptr };
+    for (int ch = 0; ch < numChannels; ++ch)
+        channelPtrs[ch] = buffer.getWritePointer(ch);
+
+    for (int sample = 0; sample < numSamples; ++sample)
+    {
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            auto& state = channels[ch];
+            const int bufferSize = static_cast<int>(state.inputBuffer.size());
+
+            // Native double - no conversion needed!
+            state.inputBuffer[state.inputWritePos] = channelPtrs[ch][sample];
+
+            // Read output - native double, no conversion!
+            double outputSample = state.outputBuffer[state.outputReadPos];
+            state.outputBuffer[state.outputReadPos] = 0.0;
+            state.outputBufferError[state.outputReadPos] = 0.0;  // Clear Kahan error
+
+            channelPtrs[ch][sample] = outputSample;
+
+            state.inputWritePos = (state.inputWritePos + 1) % bufferSize;
+            state.outputReadPos = (state.outputReadPos + 1) % bufferSize;
+
+            state.samplesUntilNextFrame--;
+            if (state.samplesUntilNextFrame <= 0)
+            {
+                if (shouldProcess)
+                {
+                    processFrame(ch);
+                }
+                else
+                {
+                    // Bypass mode: just copy input to output with proper windowing
+                    // to maintain correct latency behavior
+                    processFrameBypass(ch);
+                }
+                state.samplesUntilNextFrame = hopSize;
+            }
+        }
     }
 }
 
@@ -1028,11 +1149,11 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
 {
     if (parameterID == "outputGain")
     {
-        outputGain.setGainDecibels(newValue);
+        outputGainLinear.store(std::pow(10.0, static_cast<double>(newValue) / 20.0));
     }
     else if (parameterID == "depth")
     {
-        phaseProcessor.setDepth(newValue / 100.0f);
+        phaseProcessor.setDepth(static_cast<double>(newValue) / 100.0);
     }
     else if (parameterID == "fftQuality")
     {
@@ -1072,14 +1193,10 @@ void PhaseCorrectorAudioProcessor::prepareToPlay(double sampleRate, int samplesP
     // Prepare at native sample rate (no oversampling)
     phaseProcessor.prepare(sampleRate, samplesPerBlock);
 
-    phaseProcessor.setDepth(apvts.getRawParameterValue("depth")->load() / 100.0f);
+    phaseProcessor.setDepth(static_cast<double>(apvts.getRawParameterValue("depth")->load()) / 100.0);
 
-    juce::dsp::ProcessSpec spec;
-    spec.sampleRate = sampleRate;
-    spec.maximumBlockSize = static_cast<juce::uint32>(samplesPerBlock);
-    spec.numChannels = 2;
-    outputGain.prepare(spec);
-    outputGain.setGainDecibels(apvts.getRawParameterValue("outputGain")->load());
+    // Initialize double-precision output gain
+    outputGainLinear.store(std::pow(10.0, static_cast<double>(apvts.getRawParameterValue("outputGain")->load()) / 20.0));
 
     // Report latency to host for PDC
     setLatencySamples(phaseProcessor.getLatencySamples());
@@ -1109,18 +1226,18 @@ void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
     for (int i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear(i, 0, buffer.getNumSamples());
 
-    const float dryWet = apvts.getRawParameterValue("dryWet")->load() / 100.0f;
+    const double dryWet = static_cast<double>(apvts.getRawParameterValue("dryWet")->load()) / 100.0;
 
     // Store dry signal
     juce::AudioBuffer<float> dryBuffer;
-    if (dryWet < 1.0f)
+    if (dryWet < 1.0)
         dryBuffer.makeCopyOf(buffer);
 
     // Process phase at native sample rate
     phaseProcessor.process(buffer);
 
-    // Dry/Wet mix
-    if (dryWet < 1.0f)
+    // Dry/Wet mix (double precision)
+    if (dryWet < 1.0)
     {
         for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
         {
@@ -1128,14 +1245,81 @@ void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
             const auto* dryData = dryBuffer.getReadPointer(ch);
 
             for (int i = 0; i < buffer.getNumSamples(); ++i)
-                wetData[i] = dryData[i] * (1.0f - dryWet) + wetData[i] * dryWet;
+            {
+                wetData[i] = static_cast<float>(
+                    static_cast<double>(dryData[i]) * (1.0 - dryWet) +
+                    static_cast<double>(wetData[i]) * dryWet
+                );
+            }
         }
     }
 
-    // Output gain
-    juce::dsp::AudioBlock<float> outputBlock(buffer);
-    juce::dsp::ProcessContextReplacing<float> context(outputBlock);
-    outputGain.process(context);
+    // Output gain (double precision)
+    const double gain = outputGainLinear.load(std::memory_order_relaxed);
+    if (gain != 1.0)
+    {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+        {
+            auto* data = buffer.getWritePointer(ch);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                data[i] = static_cast<float>(static_cast<double>(data[i]) * gain);
+        }
+    }
+}
+
+//==============================================================================
+// 64-bit Native Double Precision Processing (VST3 hosts that support it)
+// This eliminates the float conversion bottleneck entirely
+//==============================================================================
+void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<double>& buffer, juce::MidiBuffer&)
+{
+    juce::ScopedNoDenormals noDenormals;
+
+    const int totalNumInputChannels = getTotalNumInputChannels();
+    const int totalNumOutputChannels = getTotalNumOutputChannels();
+    const int numSamples = buffer.getNumSamples();
+
+    for (int i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, numSamples);
+
+    const double dryWet = static_cast<double>(apvts.getRawParameterValue("dryWet")->load()) / 100.0;
+
+    // Store dry signal (native double)
+    juce::AudioBuffer<double> dryBuffer;
+    if (dryWet < 1.0)
+        dryBuffer.makeCopyOf(buffer);
+
+    // Process phase at native sample rate (native double - no conversion!)
+    phaseProcessor.process(buffer);
+
+    // Dry/Wet mix (native double - no conversion needed!)
+    if (dryWet < 1.0)
+    {
+        const int numChannels = buffer.getNumChannels();
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            double* __restrict wetData = buffer.getWritePointer(ch);
+            const double* __restrict dryData = dryBuffer.getReadPointer(ch);
+            const double wet = dryWet;
+            const double dry = 1.0 - dryWet;
+
+            for (int i = 0; i < numSamples; ++i)
+                wetData[i] = dryData[i] * dry + wetData[i] * wet;
+        }
+    }
+
+    // Output gain (native double - no conversion needed!)
+    const double gain = outputGainLinear.load(std::memory_order_relaxed);
+    if (gain != 1.0)
+    {
+        const int numChannels = buffer.getNumChannels();
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            double* __restrict data = buffer.getWritePointer(ch);
+            for (int i = 0; i < numSamples; ++i)
+                data[i] *= gain;
+        }
+    }
 }
 
 bool PhaseCorrectorAudioProcessor::loadCSVFile(const juce::File& file)

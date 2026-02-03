@@ -176,11 +176,12 @@ public:
 
     void prepare(double sampleRate, int maxBlockSize);
     void process(juce::AudioBuffer<float>& buffer);
+    void process(juce::AudioBuffer<double>& buffer);  // 64-bit native processing
     void reset();
 
     void updatePhaseCurve(const std::vector<std::pair<double, double>>& points);
-    void setDepth(float depth) { phaseDepth.store(juce::jlimit(-2.0f, 2.0f, depth)); }
-    float getDepth() const { return phaseDepth.load(); }
+    void setDepth(double depth) { phaseDepth.store(juce::jlimit(-2.0, 2.0, depth)); }
+    double getDepth() const { return phaseDepth.load(); }
 
     // Quality and overlap settings
     void setQuality(Quality q);
@@ -230,6 +231,7 @@ private:
     {
         std::vector<double> inputBuffer;
         std::vector<double> outputBuffer;
+        std::vector<double> outputBufferError;  // Kahan summation error compensation
         std::vector<double> fftBuffer;  // Pre-allocated FFT workspace
         int inputWritePos = 0;
         int outputReadPos = 0;
@@ -239,6 +241,7 @@ private:
         {
             inputBuffer.resize(bufferSize, 0.0);
             outputBuffer.resize(bufferSize, 0.0);
+            outputBufferError.resize(bufferSize, 0.0);
             fftBuffer.resize(newFftSize * 2, 0.0);  // Real + imaginary
             inputWritePos = 0;
             outputReadPos = 0;
@@ -249,6 +252,7 @@ private:
         {
             std::fill(inputBuffer.begin(), inputBuffer.end(), 0.0);
             std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+            std::fill(outputBufferError.begin(), outputBufferError.end(), 0.0);
             inputWritePos = 0;
             outputReadPos = 0;
         }
@@ -283,7 +287,7 @@ private:
     std::mutex curveMutex;
 
     double currentSampleRate = 44100.0;
-    std::atomic<float> phaseDepth{1.0f};
+    std::atomic<double> phaseDepth{1.0};  // Double precision for minimal noise
 
     static constexpr double MIN_FREQ = 20.0;
     static constexpr double MAX_FREQ = 20000.0;
@@ -359,6 +363,10 @@ public:
     bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
 
+    // 64-bit double precision processing for hosts that support it
+    bool supportsDoublePrecisionProcessing() const override { return true; }
+    void processBlock(juce::AudioBuffer<double>&, juce::MidiBuffer&) override;
+
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override;
 
@@ -398,7 +406,7 @@ private:
 
     // DSP Components
     PhaseProcessor phaseProcessor;
-    juce::dsp::Gain<float> outputGain;
+    std::atomic<double> outputGainLinear{1.0};  // Double-precision gain (linear)
 
     // Preset Manager
     PresetManager presetManager;
