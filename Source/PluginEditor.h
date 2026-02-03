@@ -1,7 +1,7 @@
 /*
   ==============================================================================
     PhaseCorrector - Plugin Editor Header
-    Premium UI with liquid metal aesthetic
+    ULTRA LUXURY CHAMPION EDITION
   ==============================================================================
 */
 
@@ -75,6 +75,7 @@ private:
 
     bool isDraggingOver = false;
     juce::Path curvePath;
+    float animationPhase = 0.0f;
 
     static constexpr float LOG_MIN_FREQ = 1.301030f;
     static constexpr float LOG_MAX_FREQ = 4.301030f;
@@ -107,6 +108,13 @@ public:
 
     void drawToggleButton(juce::Graphics& g, juce::ToggleButton& button,
                           bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
+
+    void drawButtonBackground(juce::Graphics& g, juce::Button& button,
+                              const juce::Colour& backgroundColour,
+                              bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
+
+    void drawButtonText(juce::Graphics& g, juce::TextButton& button,
+                        bool shouldDrawButtonAsHighlighted, bool shouldDrawButtonAsDown) override;
 
 private:
     juce::Colour accentColour;
