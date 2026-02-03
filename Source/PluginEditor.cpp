@@ -54,7 +54,7 @@ namespace LiquidMetal
 PhaseCurveDisplay::PhaseCurveDisplay(PhaseCorrectorAudioProcessor& processor)
     : audioProcessor(processor)
 {
-    startTimerHz(60);  // Smooth animation refresh
+    startTimerHz(20);  // Reduced from 60 Hz - still smooth, much lower CPU
     setMouseCursor(juce::MouseCursor::CrosshairCursor);
 }
 
@@ -65,8 +65,10 @@ PhaseCurveDisplay::~PhaseCurveDisplay()
 
 void PhaseCurveDisplay::timerCallback()
 {
-    animationPhase += 0.03f;  // Smooth animation increment
+    animationPhase += 0.05f;  // Adjusted for 20 Hz timer
     if (animationPhase > 6.28318f) animationPhase -= 6.28318f;
+
+    bool needsRepaint = false;
 
     if (!isDrawing && !isDraggingPoint)
     {
@@ -74,9 +76,17 @@ void PhaseCurveDisplay::timerCallback()
         if (editablePoints.empty() && !processorPoints.empty())
         {
             editablePoints = processorPoints;
+            needsRepaint = true;
         }
     }
-    repaint();
+    else
+    {
+        needsRepaint = true;  // Always repaint during interaction
+    }
+
+    // Only repaint if actively interacting or dragging over
+    if (needsRepaint || isDraggingOver)
+        repaint();
 }
 
 float PhaseCurveDisplay::logFreqToX(float logFreq) const
@@ -333,9 +343,7 @@ void PhaseCurveDisplay::drawGrid(juce::Graphics& g)
         .withTrimmedTop(marginTop)
         .withTrimmedBottom(marginBottom);
 
-    float glow = 0.5f + 0.5f * std::sin(animationPhase);
-
-    // Ultra premium graph background with deep depth
+    // Premium graph background (single gradient fill)
     juce::ColourGradient bgGradient(LiquidMetal::graphBg,
                                      static_cast<float>(graphArea.getX()), static_cast<float>(graphArea.getY()),
                                      LiquidMetal::background1,
@@ -343,29 +351,16 @@ void PhaseCurveDisplay::drawGrid(juce::Graphics& g)
     g.setGradientFill(bgGradient);
     g.fillRoundedRectangle(graphArea.toFloat(), 8.0f);
 
-    // Inner shadow effect - deeper for luxury feel
-    juce::ColourGradient innerShadow(juce::Colour(0x50000000),
-                                      static_cast<float>(graphArea.getX()), static_cast<float>(graphArea.getY()),
-                                      juce::Colour(0x00000000),
-                                      static_cast<float>(graphArea.getX()), static_cast<float>(graphArea.getY() + 30), false);
-    g.setGradientFill(innerShadow);
-    g.fillRoundedRectangle(graphArea.toFloat(), 8.0f);
+    // Single subtle top highlight (static, not animated)
+    g.setColour(juce::Colour(0x18ffffff));
+    g.drawHorizontalLine(graphArea.getY() + 1, static_cast<float>(graphArea.getX() + 4), static_cast<float>(graphArea.getRight() - 4));
 
-    // Diamond highlight at top - animated sparkle
-    float sparkleAlpha = 0.08f + 0.04f * glow;
-    juce::ColourGradient topSparkle(LiquidMetal::diamond.withAlpha(sparkleAlpha),
-                                     static_cast<float>(graphArea.getCentreX()), static_cast<float>(graphArea.getY()),
-                                     juce::Colour(0x00ffffff),
-                                     static_cast<float>(graphArea.getCentreX()), static_cast<float>(graphArea.getY() + 40), false);
-    g.setGradientFill(topSparkle);
-    g.fillRoundedRectangle(graphArea.toFloat(), 8.0f);
-
-    // Frequency grid lines with subtle gold tint
+    // Frequency grid lines
     std::array<float, 9> freqs = { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f };
+    g.setColour(LiquidMetal::graphGrid);
     for (float freq : freqs)
     {
         float x = logFreqToX(std::log10(freq));
-        g.setColour(LiquidMetal::graphGrid.interpolatedWith(LiquidMetal::goldDim, 0.1f));
         g.drawVerticalLine(static_cast<int>(x), static_cast<float>(marginTop), static_cast<float>(getHeight() - marginBottom));
     }
 
@@ -376,38 +371,25 @@ void PhaseCurveDisplay::drawGrid(juce::Graphics& g)
         float y = phaseToY(phase);
         if (std::abs(phase) < 0.01f)
         {
-            // Center line with gold accent
-            g.setColour(LiquidMetal::gold.withAlpha(0.3f + 0.1f * glow));
-            g.drawHorizontalLine(static_cast<int>(y), static_cast<float>(marginLeft), static_cast<float>(getWidth() - marginRight));
+            g.setColour(LiquidMetal::gold.withAlpha(0.35f));
         }
         else
         {
             g.setColour(LiquidMetal::graphGrid);
-            g.drawHorizontalLine(static_cast<int>(y), static_cast<float>(marginLeft), static_cast<float>(getWidth() - marginRight));
         }
+        g.drawHorizontalLine(static_cast<int>(y), static_cast<float>(marginLeft), static_cast<float>(getWidth() - marginRight));
     }
 
-    // Premium border with animated gold glow
-    float borderGlow = 0.4f + 0.2f * glow;
-    g.setColour(LiquidMetal::gold.withAlpha(borderGlow * 0.15f));
-    g.drawRoundedRectangle(graphArea.toFloat().expanded(2.0f), 10.0f, 3.0f);
-
-    g.setColour(LiquidMetal::gold.withAlpha(borderGlow * 0.3f));
-    g.drawRoundedRectangle(graphArea.toFloat().expanded(1.0f), 9.0f, 1.5f);
-
-    g.setColour(LiquidMetal::border);
+    // Simple border (single layer instead of 3)
+    g.setColour(LiquidMetal::gold.withAlpha(0.25f));
     g.drawRoundedRectangle(graphArea.toFloat(), 8.0f, 1.5f);
 
-    // Corner diamond accents
+    // Corner accents (static)
     float cornerSize = 4.0f;
-    g.setColour(LiquidMetal::gold.withAlpha(0.6f + 0.3f * glow));
-    // Top-left
+    g.setColour(LiquidMetal::gold.withAlpha(0.7f));
     g.fillEllipse(static_cast<float>(graphArea.getX()) - 2.0f, static_cast<float>(graphArea.getY()) - 2.0f, cornerSize, cornerSize);
-    // Top-right
     g.fillEllipse(static_cast<float>(graphArea.getRight()) - 2.0f, static_cast<float>(graphArea.getY()) - 2.0f, cornerSize, cornerSize);
-    // Bottom-left
     g.fillEllipse(static_cast<float>(graphArea.getX()) - 2.0f, static_cast<float>(graphArea.getBottom()) - 2.0f, cornerSize, cornerSize);
-    // Bottom-right
     g.fillEllipse(static_cast<float>(graphArea.getRight()) - 2.0f, static_cast<float>(graphArea.getBottom()) - 2.0f, cornerSize, cornerSize);
 }
 
@@ -456,12 +438,10 @@ void PhaseCurveDisplay::drawCurve(juce::Graphics& g)
 {
     const auto& points = editablePoints.empty() ? audioProcessor.getCurrentCurvePoints() : editablePoints;
 
-    float glow = 0.5f + 0.5f * std::sin(animationPhase);
-
     if (points.empty())
     {
-        // Elegant empty state message with gold accent
-        g.setColour(LiquidMetal::gold.withAlpha(0.4f + 0.2f * glow));
+        // Empty state message
+        g.setColour(LiquidMetal::gold.withAlpha(0.5f));
         g.setFont(juce::FontOptions(static_cast<float>(getWidth()) / 45.0f));
         g.drawText("Draw your phase curve",
                    getLocalBounds(), juce::Justification::centred);
@@ -487,70 +467,46 @@ void PhaseCurveDisplay::drawCurve(juce::Graphics& g)
         }
     }
 
-    // ULTRA PREMIUM curve rendering - Champion Edition
-    // Animated outer glow - pulsing gold aura
-    float glowIntensity = 0.2f + 0.15f * glow;
-    g.setColour(LiquidMetal::gold.withAlpha(glowIntensity * 0.4f));
-    g.strokePath(curvePath, juce::PathStrokeType(14.0f, juce::PathStrokeType::curved));
+    // Premium curve rendering - optimized (4 layers instead of 8)
+    // Gold glow (single combined layer)
+    g.setColour(LiquidMetal::gold.withAlpha(0.25f));
+    g.strokePath(curvePath, juce::PathStrokeType(8.0f, juce::PathStrokeType::curved));
 
-    g.setColour(LiquidMetal::gold.withAlpha(glowIntensity * 0.6f));
-    g.strokePath(curvePath, juce::PathStrokeType(10.0f, juce::PathStrokeType::curved));
-
-    g.setColour(LiquidMetal::gold.withAlpha(glowIntensity));
-    g.strokePath(curvePath, juce::PathStrokeType(7.0f, juce::PathStrokeType::curved));
-
-    // Dark chrome shadow for depth
-    g.setColour(LiquidMetal::chromeDark.withAlpha(0.8f));
-    g.strokePath(curvePath, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved));
-
-    // Mid chrome layer
+    // Chrome shadow
     g.setColour(LiquidMetal::chromeDim);
-    g.strokePath(curvePath, juce::PathStrokeType(3.5f, juce::PathStrokeType::curved));
+    g.strokePath(curvePath, juce::PathStrokeType(4.0f, juce::PathStrokeType::curved));
 
-    // Bright chrome
+    // Bright chrome core
     g.setColour(LiquidMetal::chrome);
     g.strokePath(curvePath, juce::PathStrokeType(2.5f, juce::PathStrokeType::curved));
 
-    // Diamond hot highlight
+    // Diamond highlight
     g.setColour(LiquidMetal::chromeBright);
-    g.strokePath(curvePath, juce::PathStrokeType(1.5f, juce::PathStrokeType::curved));
-
-    // Pure white core highlight
-    g.setColour(LiquidMetal::diamond.withAlpha(0.8f));
-    g.strokePath(curvePath, juce::PathStrokeType(0.75f, juce::PathStrokeType::curved));
+    g.strokePath(curvePath, juce::PathStrokeType(1.0f, juce::PathStrokeType::curved));
 }
 
 void PhaseCurveDisplay::drawPoints(juce::Graphics& g)
 {
-    if (editablePoints.size() > 0 && editablePoints.size() < 200)
+    // Only draw individual points when there are few enough to see
+    if (editablePoints.size() > 0 && editablePoints.size() < 100)
     {
-        float glow = 0.5f + 0.5f * std::sin(animationPhase);
-
         for (const auto& point : editablePoints)
         {
             float x = logFreqToX(static_cast<float>(point.first));
             float y = phaseToY(static_cast<float>(point.second));
 
-            // Ultra-luxury diamond points with gold glow
-            // Outer gold glow
-            g.setColour(LiquidMetal::gold.withAlpha(0.3f + 0.2f * glow));
-            g.fillEllipse(x - 7.0f, y - 7.0f, 14.0f, 14.0f);
-
-            // Chrome shadow
-            g.setColour(LiquidMetal::chromeDark);
+            // Simplified point rendering (3 draws instead of 5)
+            // Gold glow
+            g.setColour(LiquidMetal::gold.withAlpha(0.35f));
             g.fillEllipse(x - 5.0f, y - 5.0f, 10.0f, 10.0f);
 
             // Chrome body
             g.setColour(LiquidMetal::chrome);
-            g.fillEllipse(x - 4.0f, y - 4.0f, 8.0f, 8.0f);
+            g.fillEllipse(x - 3.5f, y - 3.5f, 7.0f, 7.0f);
 
-            // Gold ring accent
-            g.setColour(LiquidMetal::gold.withAlpha(0.7f));
-            g.drawEllipse(x - 4.0f, y - 4.0f, 8.0f, 8.0f, 0.8f);
-
-            // Diamond highlight
+            // Highlight
             g.setColour(LiquidMetal::diamond);
-            g.fillEllipse(x - 2.0f, y - 3.0f, 3.0f, 3.0f);
+            g.fillEllipse(x - 1.5f, y - 2.0f, 3.0f, 3.0f);
         }
     }
 }
@@ -579,12 +535,11 @@ void PhaseCurveDisplay::paint(juce::Graphics& g)
             .withTrimmedLeft(marginLeft).withTrimmedRight(marginRight)
             .withTrimmedTop(marginTop).withTrimmedBottom(marginBottom);
 
-        // Animated gold glow overlay
-        float glow = 0.5f + 0.5f * std::sin(animationPhase * 2.0f);
-        g.setColour(LiquidMetal::gold.withAlpha(0.15f + 0.1f * glow));
+        // Static highlight overlay
+        g.setColour(LiquidMetal::gold.withAlpha(0.2f));
         g.fillRoundedRectangle(graphArea.toFloat(), 8.0f);
 
-        g.setColour(LiquidMetal::gold.withAlpha(0.5f));
+        g.setColour(LiquidMetal::gold.withAlpha(0.6f));
         g.drawRoundedRectangle(graphArea.toFloat(), 8.0f, 2.0f);
 
         g.setColour(LiquidMetal::goldBright);
@@ -699,65 +654,42 @@ void PhaseCorrectorLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y
     g.strokePath(backgroundArc, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));
 
-    // Value arc - CHAMPION gold glow effect
+    // Value arc - optimized (3 layers instead of 6)
     juce::Path valueArc;
     valueArc.addCentredArc(centreX, centreY, radius, radius, 0.0f,
                            rotaryStartAngle, angle, true);
 
-    // Gold outer glow
-    g.setColour(LiquidMetal::gold.withAlpha(0.25f));
-    g.strokePath(valueArc, juce::PathStrokeType(10.0f, juce::PathStrokeType::curved,
-                                                 juce::PathStrokeType::rounded));
-    g.setColour(LiquidMetal::gold.withAlpha(0.4f));
+    // Gold glow (combined)
+    g.setColour(LiquidMetal::gold.withAlpha(0.3f));
     g.strokePath(valueArc, juce::PathStrokeType(7.0f, juce::PathStrokeType::curved,
                                                  juce::PathStrokeType::rounded));
 
-    // Chrome layers for liquid metal effect
-    g.setColour(LiquidMetal::chromeDark);
-    g.strokePath(valueArc, juce::PathStrokeType(5.5f, juce::PathStrokeType::curved,
-                                                 juce::PathStrokeType::rounded));
-    g.setColour(LiquidMetal::chromeDim);
+    // Chrome body
+    g.setColour(LiquidMetal::chrome);
     g.strokePath(valueArc, juce::PathStrokeType(4.0f, juce::PathStrokeType::curved,
                                                  juce::PathStrokeType::rounded));
-    g.setColour(LiquidMetal::chrome);
-    g.strokePath(valueArc, juce::PathStrokeType(2.5f, juce::PathStrokeType::curved,
-                                                 juce::PathStrokeType::rounded));
+
+    // Bright highlight
     g.setColour(LiquidMetal::chromeBright);
-    g.strokePath(valueArc, juce::PathStrokeType(1.2f, juce::PathStrokeType::curved,
+    g.strokePath(valueArc, juce::PathStrokeType(1.5f, juce::PathStrokeType::curved,
                                                  juce::PathStrokeType::rounded));
 
-    // Center knob - premium metallic look with gold accent
+    // Center knob - simplified
     float knobRadius = radius * 0.45f;
 
-    // Outer gold ring on knob
-    g.setColour(LiquidMetal::gold.withAlpha(0.3f));
-    g.drawEllipse(centreX - knobRadius - 1, centreY - knobRadius - 1, (knobRadius + 1) * 2, (knobRadius + 1) * 2, 2.0f);
-
-    // Knob shadow
-    g.setColour(juce::Colour(0x50000000));
-    g.fillEllipse(centreX - knobRadius + 2, centreY - knobRadius + 2, knobRadius * 2, knobRadius * 2);
-
-    // Knob base gradient
-    juce::ColourGradient knobGradient(LiquidMetal::surfaceLight, centreX - knobRadius * 0.5f, centreY - knobRadius * 0.5f,
-                                       LiquidMetal::background1, centreX + knobRadius * 0.5f, centreY + knobRadius * 0.5f, true);
-    g.setGradientFill(knobGradient);
+    // Knob base
+    g.setColour(LiquidMetal::surface);
     g.fillEllipse(centreX - knobRadius, centreY - knobRadius, knobRadius * 2, knobRadius * 2);
 
-    // Knob highlight - diamond sparkle
-    g.setColour(juce::Colour(0x25ffffff));
-    g.fillEllipse(centreX - knobRadius * 0.6f, centreY - knobRadius * 0.8f, knobRadius * 0.8f, knobRadius * 0.5f);
-
-    // Knob border
-    g.setColour(LiquidMetal::border);
-    g.drawEllipse(centreX - knobRadius, centreY - knobRadius, knobRadius * 2, knobRadius * 2, 1.0f);
+    // Gold ring
+    g.setColour(LiquidMetal::gold.withAlpha(0.4f));
+    g.drawEllipse(centreX - knobRadius, centreY - knobRadius, knobRadius * 2, knobRadius * 2, 1.5f);
 
     // Center jewel
-    g.setColour(LiquidMetal::gold.withAlpha(0.6f));
-    g.fillEllipse(centreX - 3.0f, centreY - 3.0f, 6.0f, 6.0f);
-    g.setColour(LiquidMetal::goldBright.withAlpha(0.8f));
-    g.fillEllipse(centreX - 1.5f, centreY - 2.0f, 3.0f, 3.0f);
+    g.setColour(LiquidMetal::gold.withAlpha(0.7f));
+    g.fillEllipse(centreX - 2.5f, centreY - 2.5f, 5.0f, 5.0f);
 
-    // Pointer - chrome needle with gold tip
+    // Pointer
     juce::Path pointer;
     const float pointerLength = radius * 0.55f;
     const float pointerThickness = 2.5f;
@@ -767,13 +699,11 @@ void PhaseCorrectorLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y
     g.setColour(LiquidMetal::chromeBright);
     g.fillPath(pointer, juce::AffineTransform::rotation(angle).translated(centreX, centreY));
 
-    // Gold diamond at pointer tip
+    // Gold tip indicator
     float tipX = centreX + std::sin(angle) * (radius - 10.0f);
     float tipY = centreY - std::cos(angle) * (radius - 10.0f);
     g.setColour(LiquidMetal::gold);
-    g.fillEllipse(tipX - 3.5f, tipY - 3.5f, 7.0f, 7.0f);
-    g.setColour(LiquidMetal::goldBright);
-    g.fillEllipse(tipX - 2.0f, tipY - 2.5f, 4.0f, 4.0f);
+    g.fillEllipse(tipX - 3.0f, tipY - 3.0f, 6.0f, 6.0f);
 
     // Value text with gold tint
     g.setColour(LiquidMetal::textPrimary);
@@ -1101,105 +1031,49 @@ void PhaseCorrectorAudioProcessorEditor::paint(juce::Graphics& g)
     float w = static_cast<float>(getWidth());
     float h = static_cast<float>(getHeight());
 
-    // Update animation
-    animationTime += 0.016f;
-
-    // ULTRA LUXURY background - Champion Edition
-    // Base: deep obsidian with rich undertone
+    // Premium background - single gradient (removed animated shimmer)
     juce::ColourGradient baseGradient(
         LiquidMetal::background1, 0.0f, 0.0f,
         LiquidMetal::background2, 0.0f, h, false);
     g.setGradientFill(baseGradient);
     g.fillAll();
 
-    // Animated diagonal gold shimmer - fades in/out at edges for seamless loop
-    float shimmerCycle = std::fmod(animationTime * 0.12f, 1.0f);  // 0 to 1 cycle
+    // Static subtle highlight at top
+    g.setColour(juce::Colour(0x10ffffff));
+    g.fillRect(0.0f, 0.0f, w, h * 0.08f);
 
-    // Shimmer travels from -0.3 to 1.3 (off-screen on both sides)
-    float shimmerCenter = -0.3f + shimmerCycle * 1.6f;
-
-    // Fade in/out at the edges so it's invisible when wrapping
-    float edgeFade = 1.0f;
-    if (shimmerCenter < 0.0f)
-        edgeFade = (shimmerCenter + 0.3f) / 0.3f;  // Fade in from left
-    else if (shimmerCenter > 1.0f)
-        edgeFade = (1.3f - shimmerCenter) / 0.3f;  // Fade out to right
-    edgeFade = juce::jlimit(0.0f, 1.0f, edgeFade);
-
-    float shimmerAlpha = 0.08f * edgeFade;
-
-    float shimmerLeft = w * (shimmerCenter - 0.15f);
-    float shimmerRight = w * (shimmerCenter + 0.15f);
-
-    juce::ColourGradient goldShimmer(
-        juce::Colour(0x00000000), shimmerLeft, 0.0f,
-        juce::Colour(0x00000000), shimmerRight, h, false);
-    goldShimmer.addColour(0.5, LiquidMetal::gold.withAlpha(shimmerAlpha));
-    g.setGradientFill(goldShimmer);
-    g.fillAll();
-
-    // Subtle brushed metal texture
-    juce::ColourGradient brushedMetal(
-        juce::Colour(0x00000000), 0.0f, 0.0f,
-        juce::Colour(0x0a909098), w * 0.3f, h * 0.3f, false);
-    brushedMetal.addColour(0.5, juce::Colour(0x06c0c0c8));
-    brushedMetal.addColour(1.0, juce::Colour(0x00000000));
-    g.setGradientFill(brushedMetal);
-    g.fillAll();
-
-    // Top edge highlight - premium polished reflection
-    juce::ColourGradient topShine(
-        juce::Colour(0x20ffffff), 0.0f, 0.0f,
-        juce::Colour(0x00ffffff), 0.0f, h * 0.12f, false);
-    g.setGradientFill(topShine);
-    g.fillRect(0.0f, 0.0f, w, h * 0.12f);
-
-    // CHAMPION gold header accent - triple line
+    // Gold header accent line
     g.setColour(LiquidMetal::gold.withAlpha(0.5f));
     g.fillRect(0.0f, 0.0f, w, 2.0f);
-    g.setColour(LiquidMetal::goldBright.withAlpha(0.3f));
+    g.setColour(LiquidMetal::gold.withAlpha(0.2f));
     g.fillRect(0.0f, 2.0f, w, 1.0f);
-    g.setColour(LiquidMetal::gold.withAlpha(0.15f));
-    g.fillRect(0.0f, 3.0f, w, 1.0f);
 
-    // Corner diamond accents
-    float cornerGlow = 0.4f + 0.2f * std::sin(animationTime * 2.0f);
-    g.setColour(LiquidMetal::gold.withAlpha(cornerGlow));
+    // Corner diamond accents (static)
+    g.setColour(LiquidMetal::gold.withAlpha(0.5f));
     g.fillEllipse(8.0f, 8.0f, 6.0f, 6.0f);
     g.fillEllipse(w - 14.0f, 8.0f, 6.0f, 6.0f);
 
-    // Control panel area - recessed premium look
+    // Control panel area
     float scale = static_cast<float>(getWidth()) / BASE_WIDTH;
     int controlsY = static_cast<int>(360 * scale);
-
-    // Recessed panel shadow - deeper
-    juce::ColourGradient panelShadow(
-        juce::Colour(0x50000000), 0.0f, static_cast<float>(controlsY),
-        juce::Colour(0x00000000), 0.0f, static_cast<float>(controlsY + 12), false);
-    g.setGradientFill(panelShadow);
-    g.fillRect(0.0f, static_cast<float>(controlsY), w, 12.0f);
 
     // Panel background
     juce::ColourGradient panelGradient(
         LiquidMetal::background1, 0.0f, static_cast<float>(controlsY),
         juce::Colour(0xff050508), 0.0f, h, false);
     g.setGradientFill(panelGradient);
-    g.fillRect(0, controlsY + 2, getWidth(), getHeight() - controlsY - 2);
+    g.fillRect(0, controlsY, getWidth(), getHeight() - controlsY);
 
-    // Panel gold accent line
+    // Panel divider line
     g.setColour(LiquidMetal::gold.withAlpha(0.25f));
     g.drawHorizontalLine(controlsY, 0.0f, w);
-    g.setColour(LiquidMetal::gold.withAlpha(0.1f));
-    g.drawHorizontalLine(controlsY + 1, 0.0f, w);
-    g.setColour(juce::Colour(0x10ffffff));
-    g.drawHorizontalLine(controlsY + 4, 0.0f, w);
 
-    // Bottom edge - prominent gold accent
+    // Bottom accent
     g.setColour(LiquidMetal::gold.withAlpha(0.3f));
     g.fillRect(0.0f, h - 2.0f, w, 2.0f);
 
-    // Bottom corner diamonds
-    g.setColour(LiquidMetal::gold.withAlpha(cornerGlow));
+    // Bottom corner diamonds (static)
+    g.setColour(LiquidMetal::gold.withAlpha(0.5f));
     g.fillEllipse(8.0f, h - 14.0f, 6.0f, 6.0f);
     g.fillEllipse(w - 14.0f, h - 14.0f, 6.0f, 6.0f);
 }
