@@ -1,7 +1,8 @@
 /*
   ==============================================================================
     PhaseCorrector - Plugin Processor Implementation
-    4x Overlap-Add FFT processing with cubic spline phase interpolation
+    Overlap-Add FFT processing with cubic spline phase interpolation
+    Optimized: SoA FFT, AVX2 SIMD, block I/O, bitmask addressing
   ==============================================================================
 */
 
@@ -14,32 +15,6 @@
 #ifndef JucePlugin_Name
     #define JucePlugin_Name "PhaseCorrector"
 #endif
-
-//==============================================================================
-// Compensated Arithmetic for High-Precision Complex Multiplication
-// Uses FMA (fused multiply-add) to eliminate catastrophic cancellation in ac-bd
-//==============================================================================
-namespace CompensatedArithmetic
-{
-    // Compute a*b - c*d with high accuracy using FMA
-    // This eliminates catastrophic cancellation when a*b ≈ c*d
-    inline double accurateDifferenceOfProducts(double a, double b, double c, double d)
-    {
-        double cd = c * d;
-        double err = std::fma(c, d, -cd);  // Exact error: c*d - cd
-        double result = std::fma(a, b, -cd);  // a*b - cd
-        return result - err;  // (a*b - cd) - (c*d - cd) = a*b - c*d
-    }
-
-    // Compute a*b + c*d with high accuracy using FMA
-    inline double accurateSumOfProducts(double a, double b, double c, double d)
-    {
-        double cd = c * d;
-        double err = std::fma(c, d, -cd);  // Exact error: c*d - cd
-        double result = std::fma(a, b, cd);  // a*b + cd
-        return result + err;  // (a*b + cd) + (c*d - cd) = a*b + c*d
-    }
-}
 
 //==============================================================================
 // Cubic Spline Implementation (with crash protection)
@@ -189,131 +164,78 @@ double CubicSpline::evaluate(double x) const
 }
 
 //==============================================================================
-// Double-Precision FFT Implementation (Cooley-Tukey Radix-2)
+// Double-Precision FFT Implementation using FFTW3
+// Split-radix, cache-oblivious, AVX2-native
 //==============================================================================
 DoubleFFT::DoubleFFT(int order)
 {
     initialize(order);
 }
 
+DoubleFFT::~DoubleFFT()
+{
+    cleanup();
+}
+
+void DoubleFFT::cleanup()
+{
+    if (forwardPlan) { fftw_destroy_plan(forwardPlan); forwardPlan = nullptr; }
+    if (inversePlan) { fftw_destroy_plan(inversePlan); inversePlan = nullptr; }
+    if (fftwReal) { fftw_free(fftwReal); fftwReal = nullptr; }
+    if (fftwComplex) { fftw_free(fftwComplex); fftwComplex = nullptr; }
+}
+
 void DoubleFFT::initialize(int order)
 {
+    cleanup();
+
     fftOrder = order;
     fftSize = 1 << order;
 
-    computeTwiddles();
+    // Allocate FFTW-aligned buffers
+    fftwReal = fftw_alloc_real(fftSize);
+    fftwComplex = fftw_alloc_complex(fftSize / 2 + 1);
 
-    // Build bit-reversal table
-    bitRevTable.resize(fftSize);
+    // Use FFTW_ESTIMATE for instant plan creation (no benchmarking)
+    // FFTW_MEASURE blocks for seconds on large FFTs and crashes hosts with audio timeouts
+    // FFTW_ESTIMATE picks a good plan heuristically — same output, ~10-20% slower execution
+    forwardPlan = fftw_plan_dft_r2c_1d(fftSize, fftwReal, fftwComplex, FFTW_ESTIMATE);
+    inversePlan = fftw_plan_dft_c2r_1d(fftSize, fftwComplex, fftwReal, FFTW_ESTIMATE);
+}
+
+void DoubleFFT::performRealForward(const double* input, double* outReal, double* outImag)
+{
+    // Copy input into FFTW-aligned buffer (FFTW may modify input with MEASURE plans)
+    std::memcpy(fftwReal, input, fftSize * sizeof(double));
+
+    fftw_execute(forwardPlan);
+
+    // Deinterleave FFTW's complex output [re,im,re,im,...] into SoA format
+    const int numBins = fftSize / 2 + 1;
+    for (int i = 0; i < numBins; ++i)
+    {
+        outReal[i] = fftwComplex[i][0];
+        outImag[i] = fftwComplex[i][1];
+    }
+}
+
+void DoubleFFT::performRealInverse(const double* inReal, const double* inImag, double* output)
+{
+    // Interleave SoA format into FFTW's complex input [re,im,re,im,...]
+    const int numBins = fftSize / 2 + 1;
+    for (int i = 0; i < numBins; ++i)
+    {
+        fftwComplex[i][0] = inReal[i];
+        fftwComplex[i][1] = inImag[i];
+    }
+
+    // FFTW c2r destroys fftwComplex (expected — we've already consumed it)
+    fftw_execute(inversePlan);
+
+    // Copy result and normalize (FFTW does NOT normalize inverse transforms)
+    const double scale = 1.0 / fftSize;
     for (int i = 0; i < fftSize; ++i)
-    {
-        int reversed = 0;
-        int temp = i;
-        for (int j = 0; j < fftOrder; ++j)
-        {
-            reversed = (reversed << 1) | (temp & 1);
-            temp >>= 1;
-        }
-        bitRevTable[i] = reversed;
-    }
-
-    workBuffer.resize(fftSize);
-}
-
-void DoubleFFT::computeTwiddles()
-{
-    twiddles.resize(fftSize / 2);
-    const double twoPi = 2.0 * juce::MathConstants<double>::pi;
-
-    for (int i = 0; i < fftSize / 2; ++i)
-    {
-        double angle = -twoPi * i / fftSize;
-        twiddles[i] = std::complex<double>(std::cos(angle), std::sin(angle));
-    }
-}
-
-void DoubleFFT::bitReverse(std::complex<double>* data)
-{
-    for (int i = 0; i < fftSize; ++i)
-    {
-        int j = bitRevTable[i];
-        if (i < j)
-            std::swap(data[i], data[j]);
-    }
-}
-
-void DoubleFFT::fftCore(std::complex<double>* data, bool inverse)
-{
-    bitReverse(data);
-
-    // Cooley-Tukey iterative FFT
-    for (int stage = 1; stage <= fftOrder; ++stage)
-    {
-        int m = 1 << stage;
-        int m2 = m >> 1;
-        int twiddleStep = fftSize / m;
-
-        for (int k = 0; k < fftSize; k += m)
-        {
-            for (int j = 0; j < m2; ++j)
-            {
-                std::complex<double> t = inverse
-                    ? std::conj(twiddles[j * twiddleStep]) * data[k + j + m2]
-                    : twiddles[j * twiddleStep] * data[k + j + m2];
-
-                std::complex<double> u = data[k + j];
-                data[k + j] = u + t;
-                data[k + j + m2] = u - t;
-            }
-        }
-    }
-
-    // Scale for inverse transform
-    if (inverse)
-    {
-        double scale = 1.0 / fftSize;
-        for (int i = 0; i < fftSize; ++i)
-            data[i] *= scale;
-    }
-}
-
-void DoubleFFT::performRealForward(double* data)
-{
-    // Pack real data into complex array
-    for (int i = 0; i < fftSize; ++i)
-        workBuffer[i] = std::complex<double>(data[i], 0.0);
-
-    fftCore(workBuffer.data(), false);
-
-    // Unpack to interleaved real/imaginary format
-    // data[0] = DC real, data[1] = DC imag (always 0 for real input)
-    // data[2*k] = real[k], data[2*k+1] = imag[k]
-    for (int i = 0; i <= fftSize / 2; ++i)
-    {
-        data[i * 2] = workBuffer[i].real();
-        data[i * 2 + 1] = workBuffer[i].imag();
-    }
-}
-
-void DoubleFFT::performRealInverse(double* data)
-{
-    // Pack interleaved complex data
-    // Only positive frequencies are stored; reconstruct negative by conjugate symmetry
-    workBuffer[0] = std::complex<double>(data[0], data[1]);
-
-    for (int i = 1; i < fftSize / 2; ++i)
-    {
-        workBuffer[i] = std::complex<double>(data[i * 2], data[i * 2 + 1]);
-        workBuffer[fftSize - i] = std::conj(workBuffer[i]);
-    }
-
-    workBuffer[fftSize / 2] = std::complex<double>(data[fftSize], data[fftSize + 1]);
-
-    fftCore(workBuffer.data(), true);
-
-    // Extract real part
-    for (int i = 0; i < fftSize; ++i)
-        data[i] = workBuffer[i].real();
+        output[i] = fftwReal[i] * scale;
 }
 
 //==============================================================================
@@ -333,7 +255,7 @@ juce::StringArray PhaseProcessor::getQualityNames()
 
 juce::StringArray PhaseProcessor::getOverlapNames()
 {
-    return { "50% (2x)", "75% (4x)", "87.5% (8x)", "93.75% (16x)", "96.875% (32x)", "98.4% (64x)" };
+    return { "50% (2x)", "75% (4x)", "87.5% (8x)", "93.75% (16x)", "96.875% (32x)", "98.4% (64x)", "99.2% (128x)", "99.6% (256x)" };
 }
 
 void PhaseProcessor::setQuality(Quality q)
@@ -360,7 +282,6 @@ void PhaseProcessor::buildWindows()
     synthesisWindow.resize(analysisSize);
 
     // Use Hann window for all overlap modes - COLA compliant
-    // Use double precision for window calculation
     // Use periodic Hann window (N in denominator) for proper COLA
     for (int i = 0; i < analysisSize; ++i)
     {
@@ -370,10 +291,8 @@ void PhaseProcessor::buildWindows()
     }
 
     // Compute COLA compensation from window energy using Kahan summation
-    // For overlap-add, compensation = hopSize / sum(window[i]²)
-    // This formula gives consistent results for any FFT size
     double windowSquaredSum = 0.0;
-    double windowSumError = 0.0;  // Kahan error compensation
+    double windowSumError = 0.0;
     for (int i = 0; i < analysisSize; ++i)
     {
         const double value = analysisWindow[i] * synthesisWindow[i];
@@ -394,7 +313,6 @@ void PhaseProcessor::reconfigure()
     juce::SpinLock::ScopedLockType lock(processingLock);
 
     // Calculate sizes based on quality
-    // Analysis order determines the analysis window size
     int analysisOrder;
     switch (currentQuality)
     {
@@ -417,28 +335,36 @@ void PhaseProcessor::reconfigure()
     switch (currentOverlap)
     {
         case Overlap::Percent50:
-            hopSize = analysisSize / 2;   // 50% overlap = 2x
+            hopSize = analysisSize / 2;
             numOverlaps = 2;
             break;
         case Overlap::Percent75:
-            hopSize = analysisSize / 4;   // 75% overlap = 4x
+            hopSize = analysisSize / 4;
             numOverlaps = 4;
             break;
         case Overlap::Percent875:
-            hopSize = analysisSize / 8;   // 87.5% overlap = 8x
+            hopSize = analysisSize / 8;
             numOverlaps = 8;
             break;
         case Overlap::Percent9375:
-            hopSize = analysisSize / 16;  // 93.75% overlap = 16x
+            hopSize = analysisSize / 16;
             numOverlaps = 16;
             break;
         case Overlap::Percent96875:
-            hopSize = analysisSize / 32;  // 96.875% overlap = 32x
+            hopSize = analysisSize / 32;
             numOverlaps = 32;
             break;
         case Overlap::Percent984375:
-            hopSize = analysisSize / 64;  // 98.4375% overlap = 64x
+            hopSize = analysisSize / 64;
             numOverlaps = 64;
+            break;
+        case Overlap::Percent9921875:
+            hopSize = analysisSize / 128;
+            numOverlaps = 128;
+            break;
+        case Overlap::Percent99609375:
+            hopSize = analysisSize / 256;
+            numOverlaps = 256;
             break;
         default:
             hopSize = analysisSize / 16;
@@ -453,7 +379,9 @@ void PhaseProcessor::reconfigure()
     buildWindows();
 
     // Resize buffers - need extra space for overlap-add
-    int bufferSize = fftSize * 2;  // Extra space for safety
+    // Buffer size must be power of 2 for bitmask addressing
+    // Use 4x for safety margin with high overlap modes and large host blocks
+    int bufferSize = fftSize * 4;
     for (auto& ch : channels)
         ch.resize(bufferSize, fftSize, hopSize);
 
@@ -488,7 +416,8 @@ void PhaseProcessor::updatePhaseCurve(const std::vector<std::pair<double, double
     if (points.size() < 2)
     {
         phaseCurve.clear();
-        std::fill(phaseTable.begin(), phaseTable.end(), 0.0);
+        filterIRReady.store(false);
+        needsFilterRebuild.store(true);
         return;
     }
 
@@ -514,7 +443,8 @@ void PhaseProcessor::updatePhaseCurve(const std::vector<std::pair<double, double
     if (validPoints.size() < 2)
     {
         phaseCurve.clear();
-        std::fill(phaseTable.begin(), phaseTable.end(), 0.0);
+        filterIRReady.store(false);
+        needsFilterRebuild.store(true);
         return;
     }
 
@@ -530,11 +460,11 @@ void PhaseProcessor::updatePhaseCurve(const std::vector<std::pair<double, double
 
     if (!phaseCurve.build(x, y))
     {
-        // Fallback to linear interpolation if spline fails
         phaseCurve.clear();
     }
 
-    rebuildPhaseTable();
+    // Defer the actual filter rebuild to the audio thread (avoids data race on filterSpec arrays)
+    needsFilterRebuild.store(true);
 }
 
 void PhaseProcessor::rebuildPhaseTable()
@@ -546,7 +476,7 @@ void PhaseProcessor::rebuildPhaseTable()
     if (static_cast<int>(phaseTable.size()) != numBins)
         phaseTable.resize(numBins, 0.0);
 
-    // Also rebuild the impulse response for proper all-pass filtering
+    // Also rebuild the filter spectrum for proper all-pass filtering
     rebuildImpulseResponse();
 
     for (int bin = 0; bin < numBins; ++bin)
@@ -589,14 +519,17 @@ void PhaseProcessor::rebuildImpulseResponse()
 {
     // Build the all-pass filter frequency response from the phase curve
     // H(k) = e^(j * phase(k)) where |H(k)| = 1 (all-pass)
-    // Store as complex spectrum for fast convolution (double precision)
+    // Store as separate real/imag arrays (SoA) for SIMD complex multiply
 
     const int numBins = fftSize / 2 + 1;
     const double depth = phaseDepth.load();
 
-    // Resize filter spectrum buffer (interleaved real/imag for complex multiply)
-    if (static_cast<int>(filterSpectrum.size()) != fftSize * 2)
-        filterSpectrum.resize(fftSize * 2, 0.0);
+    // Resize filter spectrum buffers
+    if (static_cast<int>(filterSpecReal.size()) != numBins)
+    {
+        filterSpecReal.resize(numBins, 0.0);
+        filterSpecImag.resize(numBins, 0.0);
+    }
 
     // Build complex frequency response: H(k) = e^(j * phase(k))
     for (int bin = 0; bin < numBins; ++bin)
@@ -617,8 +550,8 @@ void PhaseProcessor::rebuildImpulseResponse()
         }
 
         // H(k) = cos(phase) + j*sin(phase) (magnitude = 1, all-pass)
-        filterSpectrum[bin * 2] = std::cos(phase);      // Real
-        filterSpectrum[bin * 2 + 1] = std::sin(phase);  // Imaginary
+        filterSpecReal[bin] = std::cos(phase);
+        filterSpecImag[bin] = std::sin(phase);
     }
 
     filterIRReady.store(true);
@@ -628,68 +561,78 @@ void PhaseProcessor::processFrame(int channel)
 {
     auto& ch = channels[channel];
 
-    const int bufferSize = static_cast<int>(ch.inputBuffer.size());
+    const int bufSize = static_cast<int>(ch.inputBuffer.size());
+    const int mask = ch.bufferMask;
     int readPos = ch.inputWritePos - analysisSize;
     if (readPos < 0)
-        readPos += bufferSize;
+        readPos += bufSize;
 
-    // Use pre-allocated FFT buffer (double precision)
-    double* __restrict fftData = ch.fftBuffer.data();
+    // Fill FFT real buffer with windowed input samples
+    double* __restrict fftR = ch.fftReal.data();
+    double* __restrict fftI = ch.fftImag.data();
     const double* __restrict inBuf = ch.inputBuffer.data();
     const double* __restrict anaWin = analysisWindow.data();
 
-    // Clear FFT buffer
-    std::memset(fftData, 0, fftSize * 2 * sizeof(double));
-
-    // Apply analysis window
-    if (readPos + analysisSize <= bufferSize)
+    if (readPos + analysisSize <= bufSize)
     {
+        // Fast path: no wrap-around
         for (int i = 0; i < analysisSize; ++i)
-            fftData[i] = inBuf[readPos + i] * anaWin[i];
+            fftR[i] = inBuf[readPos + i] * anaWin[i];
     }
     else
     {
+        // Wrap-around path with bitmask
         for (int i = 0; i < analysisSize; ++i)
-        {
-            int idx = (readPos + i) % bufferSize;
-            fftData[i] = inBuf[idx] * anaWin[i];
-        }
+            fftR[i] = inBuf[(readPos + i) & mask] * anaWin[i];
     }
 
-    // Forward FFT (double precision)
-    fft.performRealForward(fftData);
+    // Forward FFT (SoA: separate real/imag output)
+    fft.performRealForward(fftR, fftR, fftI);
 
     // Apply all-pass filter via complex multiplication in frequency domain
-    // This is proper convolution: Y(k) = X(k) * H(k)
-    // Complex multiply: (a+jb)(c+jd) = (ac-bd) + j(ad+bc)
     const double depth = std::abs(phaseDepth.load());
     const bool hasPhaseData = phaseCurve.isValid() && depth > 0.001 && filterIRReady.load();
 
     if (hasPhaseData)
     {
-        const double* __restrict filterSpec = filterSpectrum.data();
+        const double* __restrict hR = filterSpecReal.data();
+        const double* __restrict hI = filterSpecImag.data();
         const int numBins = fftSize / 2 + 1;
 
-        for (int bin = 0; bin < numBins; ++bin)
+        int bin = 0;
+
+#ifdef PHASE_USE_AVX2
+        // AVX2 path: process 4 bins at once (4 doubles per 256-bit register)
+        // Produces bit-identical results to scalar (IEEE 754 compliant)
+        for (; bin + 3 < numBins; bin += 4)
         {
-            const int idx = bin * 2;
+            __m256d xr = _mm256_loadu_pd(&fftR[bin]);
+            __m256d xi = _mm256_loadu_pd(&fftI[bin]);
+            __m256d hr = _mm256_loadu_pd(&hR[bin]);
+            __m256d hi = _mm256_loadu_pd(&hI[bin]);
 
-            // Input spectrum (X)
-            const double xReal = fftData[idx];
-            const double xImag = fftData[idx + 1];
+            // Complex multiply: Y = X * H
+            // real = xr*hr - xi*hi, imag = xr*hi + xi*hr
+            __m256d yr = _mm256_sub_pd(_mm256_mul_pd(xr, hr), _mm256_mul_pd(xi, hi));
+            __m256d yi = _mm256_add_pd(_mm256_mul_pd(xr, hi), _mm256_mul_pd(xi, hr));
 
-            // Filter spectrum (H) - all-pass: H(k) = e^(j*phase(k))
-            const double hReal = filterSpec[idx];
-            const double hImag = filterSpec[idx + 1];
+            _mm256_storeu_pd(&fftR[bin], yr);
+            _mm256_storeu_pd(&fftI[bin], yi);
+        }
+#endif
 
-            // Complex multiplication: Y = X * H (double precision)
-            fftData[idx] = xReal * hReal - xImag * hImag;      // Real part
-            fftData[idx + 1] = xReal * hImag + xImag * hReal;  // Imaginary part
+        // Scalar tail (and fallback when AVX2 not available)
+        for (; bin < numBins; ++bin)
+        {
+            double xr = fftR[bin];
+            double xi = fftI[bin];
+            fftR[bin] = xr * hR[bin] - xi * hI[bin];
+            fftI[bin] = xr * hI[bin] + xi * hR[bin];
         }
     }
 
-    // Inverse FFT (double precision)
-    fft.performRealInverse(fftData);
+    // Inverse FFT (SoA: separate real/imag input, real output into fftR)
+    fft.performRealInverse(fftR, fftI, fftR);
 
     // Overlap-add with synthesis window using Kahan compensated summation
     const int writePos = ch.outputReadPos;
@@ -698,12 +641,13 @@ void PhaseProcessor::processFrame(int channel)
     const double* __restrict synWin = synthesisWindow.data();
     const double compensation = windowCompensation;
 
-    if (writePos + analysisSize <= bufferSize)
+    if (writePos + analysisSize <= bufSize)
     {
+        // Fast path: no wrap-around
         for (int i = 0; i < analysisSize; ++i)
         {
             const int idx = writePos + i;
-            const double value = fftData[i] * synWin[i] * compensation;
+            const double value = fftR[i] * synWin[i] * compensation;
             // Kahan compensated summation for near-infinite precision accumulation
             const double y = value - outBufErr[idx];
             const double t = outBuf[idx] + y;
@@ -713,11 +657,11 @@ void PhaseProcessor::processFrame(int channel)
     }
     else
     {
+        // Wrap-around path with bitmask
         for (int i = 0; i < analysisSize; ++i)
         {
-            const int idx = (writePos + i) % bufferSize;
-            const double value = fftData[i] * synWin[i] * compensation;
-            // Kahan compensated summation for near-infinite precision accumulation
+            const int idx = (writePos + i) & mask;
+            const double value = fftR[i] * synWin[i] * compensation;
             const double y = value - outBufErr[idx];
             const double t = outBuf[idx] + y;
             outBufErr[idx] = (t - outBuf[idx]) - y;
@@ -726,158 +670,210 @@ void PhaseProcessor::processFrame(int channel)
     }
 }
 
+void PhaseProcessor::processFrameBypass(int channel)
+{
+    // Optimized bypass: simple delayed copy of hopSize samples
+    // Each output position receives the exact same input value from all overlapping
+    // frames (pure delay), so we only need to write once per position.
+    auto& ch = channels[channel];
+
+    const int bufSize = static_cast<int>(ch.inputBuffer.size());
+    const int mask = ch.bufferMask;
+
+    int readPos = ch.inputWritePos - analysisSize;
+    if (readPos < 0)
+        readPos += bufSize;
+
+    const int writePos = ch.outputReadPos;
+
+    if (readPos + hopSize <= bufSize && writePos + hopSize <= bufSize)
+    {
+        // Fast path: no wrap-around on either buffer
+        std::memcpy(&ch.outputBuffer[writePos], &ch.inputBuffer[readPos], hopSize * sizeof(double));
+    }
+    else
+    {
+        for (int i = 0; i < hopSize; ++i)
+            ch.outputBuffer[(writePos + i) & mask] = ch.inputBuffer[(readPos + i) & mask];
+    }
+}
+
+//==============================================================================
+// Block-Based Processing (float) - channel-first with bulk copy
+//==============================================================================
 void PhaseProcessor::process(juce::AudioBuffer<float>& buffer)
 {
-    // Check if reconfiguration is needed (quality/overlap changed)
     if (needsReconfigure.load())
-    {
         reconfigure();
-    }
 
     juce::SpinLock::ScopedTryLockType lock(processingLock);
     if (!lock.isLocked())
-        return;  // Skip processing if reconfiguring
+        return;
+
+    // Rebuild filter spectrum safely under processing lock (deferred from message thread)
+    if (needsFilterRebuild.load())
+    {
+        rebuildPhaseTable();
+        needsFilterRebuild.store(false);
+    }
 
     const int numChannels = std::min(buffer.getNumChannels(), 2);
     const int numSamples = buffer.getNumSamples();
 
-    // Fast bypass: if no phase curve and depth is effectively zero, just pass through
-    // with latency compensation (still need to maintain buffer state)
     const double depth = std::abs(phaseDepth.load());
     const bool shouldProcess = phaseCurve.isValid() && depth > 0.001;
 
-    for (int sample = 0; sample < numSamples; ++sample)
+    // Process each channel in full before moving to the next (better cache behavior)
+    for (int ch = 0; ch < numChannels; ++ch)
     {
-        for (int ch = 0; ch < numChannels; ++ch)
+        auto& state = channels[ch];
+        const int bufSize = static_cast<int>(state.inputBuffer.size());
+        const int mask = state.bufferMask;
+        float* __restrict hostData = buffer.getWritePointer(ch);
+        double* __restrict inBuf = state.inputBuffer.data();
+        double* __restrict outBuf = state.outputBuffer.data();
+        double* __restrict outErr = state.outputBufferError.data();
+
+        int remaining = numSamples;
+        int hostPos = 0;
+
+        while (remaining > 0)
         {
-            auto& state = channels[ch];
-            const int bufferSize = static_cast<int>(state.inputBuffer.size());
+            int chunk = std::min(remaining, state.samplesUntilNextFrame);
 
-            // Convert float input to double for internal processing
-            state.inputBuffer[state.inputWritePos] = static_cast<double>(buffer.getSample(ch, sample));
+            // Copy input chunk: float host -> double circular buffer
+            {
+                int writeStart = state.inputWritePos;
+                int firstPart = std::min(chunk, bufSize - writeStart);
+                for (int i = 0; i < firstPart; ++i)
+                    inBuf[writeStart + i] = static_cast<double>(hostData[hostPos + i]);
+                if (firstPart < chunk)
+                {
+                    int secondPart = chunk - firstPart;
+                    for (int i = 0; i < secondPart; ++i)
+                        inBuf[i] = static_cast<double>(hostData[hostPos + firstPart + i]);
+                }
+            }
 
-            // Read output and convert double back to float
-            double outputSample = state.outputBuffer[state.outputReadPos];
-            state.outputBuffer[state.outputReadPos] = 0.0;
-            state.outputBufferError[state.outputReadPos] = 0.0;  // Clear Kahan error
+            // Copy output chunk: double circular buffer -> float host, then zero
+            {
+                int readStart = state.outputReadPos;
+                int firstPart = std::min(chunk, bufSize - readStart);
+                for (int i = 0; i < firstPart; ++i)
+                    hostData[hostPos + i] = static_cast<float>(outBuf[readStart + i]);
+                std::memset(&outBuf[readStart], 0, firstPart * sizeof(double));
+                std::memset(&outErr[readStart], 0, firstPart * sizeof(double));
+                if (firstPart < chunk)
+                {
+                    int secondPart = chunk - firstPart;
+                    for (int i = 0; i < secondPart; ++i)
+                        hostData[hostPos + firstPart + i] = static_cast<float>(outBuf[i]);
+                    std::memset(&outBuf[0], 0, secondPart * sizeof(double));
+                    std::memset(&outErr[0], 0, secondPart * sizeof(double));
+                }
+            }
 
-            buffer.setSample(ch, sample, static_cast<float>(outputSample));
+            state.inputWritePos = (state.inputWritePos + chunk) & mask;
+            state.outputReadPos = (state.outputReadPos + chunk) & mask;
+            state.samplesUntilNextFrame -= chunk;
+            hostPos += chunk;
+            remaining -= chunk;
 
-            state.inputWritePos = (state.inputWritePos + 1) % bufferSize;
-            state.outputReadPos = (state.outputReadPos + 1) % bufferSize;
-
-            state.samplesUntilNextFrame--;
             if (state.samplesUntilNextFrame <= 0)
             {
                 if (shouldProcess)
-                {
                     processFrame(ch);
-                }
                 else
-                {
-                    // Bypass mode: just copy input to output with proper windowing
-                    // to maintain correct latency behavior
                     processFrameBypass(ch);
-                }
                 state.samplesUntilNextFrame = hopSize;
             }
         }
     }
 }
 
-void PhaseProcessor::processFrameBypass(int channel)
-{
-    // Simplified frame processing for bypass mode - no FFT, just overlap-add (double precision)
-    auto& ch = channels[channel];
-
-    const int bufferSize = static_cast<int>(ch.inputBuffer.size());
-    int readPos = ch.inputWritePos - analysisSize;
-    if (readPos < 0)
-        readPos += bufferSize;
-
-    const int writePos = ch.outputReadPos;
-    const double* __restrict inBuf = ch.inputBuffer.data();
-    double* __restrict outBuf = ch.outputBuffer.data();
-    double* __restrict outBufErr = ch.outputBufferError.data();
-    const double* __restrict anaWin = analysisWindow.data();
-    const double* __restrict synWin = synthesisWindow.data();
-    const double compensation = windowCompensation;
-
-    // Direct overlap-add without FFT using Kahan compensated summation
-    for (int i = 0; i < analysisSize; ++i)
-    {
-        const int rIdx = (readPos + i) % bufferSize;
-        const int wIdx = (writePos + i) % bufferSize;
-        const double value = inBuf[rIdx] * anaWin[i] * synWin[i] * compensation;
-        // Kahan compensated summation for near-infinite precision accumulation
-        const double y = value - outBufErr[wIdx];
-        const double t = outBuf[wIdx] + y;
-        outBufErr[wIdx] = (t - outBuf[wIdx]) - y;
-        outBuf[wIdx] = t;
-    }
-}
-
 //==============================================================================
-// 64-bit Native Double Precision Processing (no float conversion)
+// Block-Based Processing (double) - native 64-bit, no float conversion
 //==============================================================================
 void PhaseProcessor::process(juce::AudioBuffer<double>& buffer)
 {
-    // Check if reconfiguration is needed (quality/overlap changed)
     if (needsReconfigure.load())
-    {
         reconfigure();
-    }
 
     juce::SpinLock::ScopedTryLockType lock(processingLock);
     if (!lock.isLocked())
-        return;  // Skip processing if reconfiguring
+        return;
+
+    // Rebuild filter spectrum safely under processing lock (deferred from message thread)
+    if (needsFilterRebuild.load())
+    {
+        rebuildPhaseTable();
+        needsFilterRebuild.store(false);
+    }
 
     const int numChannels = std::min(buffer.getNumChannels(), 2);
     const int numSamples = buffer.getNumSamples();
 
-    // Fast bypass: if no phase curve and depth is effectively zero, just pass through
-    // with latency compensation (still need to maintain buffer state)
     const double depth = std::abs(phaseDepth.load());
     const bool shouldProcess = phaseCurve.isValid() && depth > 0.001;
 
-    // Get raw pointers for direct access (more reliable than getSample/setSample)
-    double* channelPtrs[2] = { nullptr, nullptr };
+    // Process each channel in full before moving to the next (better cache behavior)
     for (int ch = 0; ch < numChannels; ++ch)
-        channelPtrs[ch] = buffer.getWritePointer(ch);
-
-    for (int sample = 0; sample < numSamples; ++sample)
     {
-        for (int ch = 0; ch < numChannels; ++ch)
+        auto& state = channels[ch];
+        const int bufSize = static_cast<int>(state.inputBuffer.size());
+        const int mask = state.bufferMask;
+        double* __restrict hostData = buffer.getWritePointer(ch);
+        double* __restrict inBuf = state.inputBuffer.data();
+        double* __restrict outBuf = state.outputBuffer.data();
+        double* __restrict outErr = state.outputBufferError.data();
+
+        int remaining = numSamples;
+        int hostPos = 0;
+
+        while (remaining > 0)
         {
-            auto& state = channels[ch];
-            const int bufferSize = static_cast<int>(state.inputBuffer.size());
+            int chunk = std::min(remaining, state.samplesUntilNextFrame);
 
-            // Native double - no conversion needed!
-            state.inputBuffer[state.inputWritePos] = channelPtrs[ch][sample];
+            // Copy input chunk: host -> circular buffer (native double, use memcpy)
+            {
+                int writeStart = state.inputWritePos;
+                int firstPart = std::min(chunk, bufSize - writeStart);
+                std::memcpy(&inBuf[writeStart], &hostData[hostPos], firstPart * sizeof(double));
+                if (firstPart < chunk)
+                {
+                    int secondPart = chunk - firstPart;
+                    std::memcpy(&inBuf[0], &hostData[hostPos + firstPart], secondPart * sizeof(double));
+                }
+            }
 
-            // Read output - native double, no conversion!
-            double outputSample = state.outputBuffer[state.outputReadPos];
-            state.outputBuffer[state.outputReadPos] = 0.0;
-            state.outputBufferError[state.outputReadPos] = 0.0;  // Clear Kahan error
+            // Copy output chunk: circular buffer -> host, then zero
+            {
+                int readStart = state.outputReadPos;
+                int firstPart = std::min(chunk, bufSize - readStart);
+                std::memcpy(&hostData[hostPos], &outBuf[readStart], firstPart * sizeof(double));
+                std::memset(&outBuf[readStart], 0, firstPart * sizeof(double));
+                std::memset(&outErr[readStart], 0, firstPart * sizeof(double));
+                if (firstPart < chunk)
+                {
+                    int secondPart = chunk - firstPart;
+                    std::memcpy(&hostData[hostPos + firstPart], &outBuf[0], secondPart * sizeof(double));
+                    std::memset(&outBuf[0], 0, secondPart * sizeof(double));
+                    std::memset(&outErr[0], 0, secondPart * sizeof(double));
+                }
+            }
 
-            channelPtrs[ch][sample] = outputSample;
+            state.inputWritePos = (state.inputWritePos + chunk) & mask;
+            state.outputReadPos = (state.outputReadPos + chunk) & mask;
+            state.samplesUntilNextFrame -= chunk;
+            hostPos += chunk;
+            remaining -= chunk;
 
-            state.inputWritePos = (state.inputWritePos + 1) % bufferSize;
-            state.outputReadPos = (state.outputReadPos + 1) % bufferSize;
-
-            state.samplesUntilNextFrame--;
             if (state.samplesUntilNextFrame <= 0)
             {
                 if (shouldProcess)
-                {
                     processFrame(ch);
-                }
                 else
-                {
-                    // Bypass mode: just copy input to output with proper windowing
-                    // to maintain correct latency behavior
                     processFrameBypass(ch);
-                }
                 state.samplesUntilNextFrame = hopSize;
             }
         }
@@ -1140,7 +1136,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PhaseCorrectorAudioProcessor
     // Overlap amount - affects latency vs quality trade-off
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID("fftOverlap", 1), "Overlap",
-        PhaseProcessor::getOverlapNames(), 5));  // Default: 98.4% (64x) for maximum quality
+        PhaseProcessor::getOverlapNames(), 5));  // Default: 98.4% (64x)
 
     return { params.begin(), params.end() };
 }
@@ -1157,10 +1153,8 @@ void PhaseCorrectorAudioProcessor::parameterChanged(const juce::String& paramete
     }
     else if (parameterID == "fftQuality")
     {
-        auto newQuality = static_cast<PhaseProcessor::Quality>(static_cast<int>(newValue));
-        phaseProcessor.setQuality(newQuality);
-        // Update latency reporting immediately using expected latency for new quality
-        setLatencySamples(PhaseProcessor::getLatencyForQuality(newQuality));
+        phaseProcessor.setQuality(static_cast<PhaseProcessor::Quality>(static_cast<int>(newValue)));
+        // Latency is updated after reconfigure() actually completes in processBlock
     }
     else if (parameterID == "fftOverlap")
     {
@@ -1236,6 +1230,11 @@ void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
     // Process phase at native sample rate
     phaseProcessor.process(buffer);
 
+    // Sync latency with host after any reconfigure
+    const int actualLatency = phaseProcessor.getLatencySamples();
+    if (actualLatency != getLatencySamples())
+        setLatencySamples(actualLatency);
+
     // Dry/Wet mix (double precision)
     if (dryWet < 1.0)
     {
@@ -1269,7 +1268,6 @@ void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer
 
 //==============================================================================
 // 64-bit Native Double Precision Processing (VST3 hosts that support it)
-// This eliminates the float conversion bottleneck entirely
 //==============================================================================
 void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<double>& buffer, juce::MidiBuffer&)
 {
@@ -1291,6 +1289,11 @@ void PhaseCorrectorAudioProcessor::processBlock(juce::AudioBuffer<double>& buffe
 
     // Process phase at native sample rate (native double - no conversion!)
     phaseProcessor.process(buffer);
+
+    // Sync latency with host after any reconfigure
+    const int actualLatency = phaseProcessor.getLatencySamples();
+    if (actualLatency != getLatencySamples())
+        setLatencySamples(actualLatency);
 
     // Dry/Wet mix (native double - no conversion needed!)
     if (dryWet < 1.0)

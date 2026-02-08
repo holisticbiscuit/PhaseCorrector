@@ -1,8 +1,8 @@
 /*
   ==============================================================================
     PhaseCorrector - Freeform Phase EQ Plugin
-    Low-THD FFT-based phase manipulation with 4x Overlap-Add architecture
-    Inspired by MFreeformPhase with superior audio quality
+    Low-THD FFT-based phase manipulation with Overlap-Add architecture
+    Optimized: SoA FFT, AVX2 SIMD, block I/O, bitmask addressing
   ==============================================================================
 */
 
@@ -12,9 +12,15 @@
 #include <juce_dsp/juce_dsp.h>
 #include <array>
 #include <vector>
-#include <complex>
 #include <atomic>
 #include <mutex>
+#include <cstring>
+#include <fftw3.h>
+
+#ifdef __AVX2__
+#define PHASE_USE_AVX2 1
+#include <immintrin.h>
+#endif
 
 //==============================================================================
 // Cubic Spline Interpolation for smooth phase curves
@@ -113,31 +119,36 @@ namespace FastMath
 }
 
 //==============================================================================
-// Double-Precision FFT (Cooley-Tukey Radix-2)
-// Custom implementation for 64-bit processing since JUCE FFT only supports float
+// Double-Precision FFT using FFTW3
+// Split-radix, cache-oblivious, AVX2-native — 3-5x faster than custom radix-2
+// SoA interface preserved for downstream SIMD complex multiply
 //==============================================================================
 class DoubleFFT
 {
 public:
     DoubleFFT() = default;
     explicit DoubleFFT(int order);
+    ~DoubleFFT();
+
+    // Non-copyable (FFTW plans are opaque pointers)
+    DoubleFFT(const DoubleFFT&) = delete;
+    DoubleFFT& operator=(const DoubleFFT&) = delete;
 
     void initialize(int order);
-    void performRealForward(double* data);   // In-place, real input
-    void performRealInverse(double* data);   // In-place, real output
+    void performRealForward(const double* input, double* outReal, double* outImag);
+    void performRealInverse(const double* inReal, const double* inImag, double* output);
 
     int getSize() const { return fftSize; }
 
 private:
-    void computeTwiddles();
-    void fftCore(std::complex<double>* data, bool inverse);
-    void bitReverse(std::complex<double>* data);
+    void cleanup();
 
     int fftOrder = 0;
     int fftSize = 0;
-    std::vector<std::complex<double>> twiddles;
-    std::vector<std::complex<double>> workBuffer;
-    std::vector<int> bitRevTable;
+    fftw_plan forwardPlan = nullptr;
+    fftw_plan inversePlan = nullptr;
+    double* fftwReal = nullptr;            // FFTW-aligned real buffer (N doubles)
+    fftw_complex* fftwComplex = nullptr;   // FFTW-aligned complex buffer (N/2+1)
 };
 
 //==============================================================================
@@ -168,7 +179,9 @@ public:
         Percent875 = 2,     // hopSize = fftSize/8, 8 overlaps
         Percent9375 = 3,    // hopSize = fftSize/16, 16 overlaps
         Percent96875 = 4,   // hopSize = fftSize/32, 32 overlaps
-        Percent984375 = 5   // hopSize = fftSize/64, 64 overlaps
+        Percent984375 = 5,  // hopSize = fftSize/64, 64 overlaps
+        Percent9921875 = 6, // hopSize = fftSize/128, 128 overlaps
+        Percent99609375 = 7 // hopSize = fftSize/256, 256 overlaps
     };
 
     PhaseProcessor();
@@ -219,7 +232,7 @@ public:
 
 private:
     void rebuildPhaseTable();
-    void rebuildImpulseResponse();  // Build all-pass filter IR from phase curve
+    void rebuildImpulseResponse();  // Build all-pass filter from phase curve
     void processFrame(int channel);
     void processFrameBypass(int channel);  // Fast path when no phase processing needed
     void reconfigure();  // Rebuilds FFT, windows, buffers
@@ -232,20 +245,24 @@ private:
         std::vector<double> inputBuffer;
         std::vector<double> outputBuffer;
         std::vector<double> outputBufferError;  // Kahan summation error compensation
-        std::vector<double> fftBuffer;  // Pre-allocated FFT workspace
+        std::vector<double> fftReal;   // FFT workspace - real part
+        std::vector<double> fftImag;   // FFT workspace - imaginary part
         int inputWritePos = 0;
         int outputReadPos = 0;
         int samplesUntilNextFrame = 0;
+        int bufferMask = 0;  // Power-of-2 bitmask for circular indexing
 
         void resize(int bufferSize, int newFftSize, int newHopSize)
         {
             inputBuffer.resize(bufferSize, 0.0);
             outputBuffer.resize(bufferSize, 0.0);
             outputBufferError.resize(bufferSize, 0.0);
-            fftBuffer.resize(newFftSize * 2, 0.0);  // Real + imaginary
+            fftReal.resize(newFftSize, 0.0);
+            fftImag.resize(newFftSize, 0.0);
             inputWritePos = 0;
             outputReadPos = 0;
             samplesUntilNextFrame = newHopSize;
+            bufferMask = bufferSize - 1;
         }
 
         void clear()
@@ -280,9 +297,10 @@ private:
 
     // Phase modification table (double precision)
     std::vector<double> phaseTable;
-    std::vector<double> filterIR;        // All-pass filter impulse response
-    std::vector<double> filterSpectrum;  // FFT of filter IR (for fast convolution)
+    std::vector<double> filterSpecReal;   // All-pass filter spectrum - real part
+    std::vector<double> filterSpecImag;   // All-pass filter spectrum - imaginary part
     std::atomic<bool> filterIRReady{false};
+    std::atomic<bool> needsFilterRebuild{false};  // Defers filter rebuild to audio thread
     CubicSpline phaseCurve;
     std::mutex curveMutex;
 
